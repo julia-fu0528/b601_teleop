@@ -1,0 +1,137 @@
+# B601-RS gravity-compensation / drag-teach configuration.
+# Sign convention (verified by Seeed, 2026-07-17): motor mechPos == URDF q, motor tau == URDF tau,
+# motor zero == URDF zero (rest pose = extended arm). No offsets.
+
+[bus]
+channel = "can0"      # macOS PCAN-USB: motorbridge maps can0 -> PCAN_USBBUS1
+host_id = 0xFD
+
+[model]
+urdf = "urdf/00-arm-rs_asm-v3/urdf/00-arm-rs_asm-v3.urdf"
+lock_joints = ["joint_left", "joint_right"]   # gripper fingers are not part of the arm dynamics
+
+[loop]
+rate_hz = 100.0          # param reads + MIT frames: ~24 CAN frames per cycle at 1 Mbps
+ramp_s = 3.0             # soft-start: stiff hold while the feed-forward ramps 0 -> 100 % (hands off the arm)
+fade_s = 2.0             # then the hold gains fade out to the drag gains (hands off)
+ramp_window = 0.2        # rad; any joint drifting more than this from the start pose during ramp/fade => freeze
+vel_abort = 4.0          # rad/s; any joint faster than this while dragging => freeze (rs-06 limit_spd is 10)
+read_timeout_ms = 50
+max_read_failures = 3
+temp_abort_c = 80.0      # rotor/MOS temperature => freeze (RobStride alarm level)
+release_s = 3.0          # duration of the torque fade when releasing from HOLD
+
+# g_scale/g_bias: feed-forward = g_scale * g_urdf(q) + g_bias, fitted on this unit with scripts/fit_gravity.py
+#          (Seeed's reference values were k = 0.948 / 0.952 / 0.885, no bias).
+# tau_max: clamp on the commanded feed-forward; worst-case model gravity over the workspace is
+#          j2 15.5, j3 7.2, j4 2.0, j5 0.85 N.m (j1/j6 carry no gravity torque).
+# kd_drag: light damping while dragging (0 => pure gravity feed-forward).
+# fric_comp: Coulomb-friction feed-forward f*tanh(v/0.08) while dragging; MUST stay below the joint's real
+#          static friction (RS-06 ~0.5 N.m, RS-00 ~0.2-0.3) or the joint will creep on its own. CLI: --fric 0 disables.
+# hold_*:  PD gains used by HOLD (freeze / Ctrl+C) and by the start-up RAMP, always together with the
+#          gravity feed-forward. Stiff enough that the hold alone sags < 0.06 rad under full gravity
+#          (j3: 7 N.m / 120 = 0.06 rad). RobStride MIT kd is clamped to 5.
+
+[[joint]]
+name = "joint1"
+id = 1
+model = "rs-06"
+g_scale = 1.0
+tau_max = 3.0
+kd_drag = 0.5
+fric_comp = 0.0
+hold_kp = 20.0
+hold_kd = 1.5
+
+[[joint]]
+name = "joint2"
+id = 2
+model = "rs-06"
+g_scale = 0.91
+g_bias = -0.21   # fitted 2026-08-25 from 10 'c' captures: constant forward pull (cable harness), rms 0.02 N.m
+tau_max = 18.0
+kd_drag = 0.5
+fric_comp = 0.0
+hold_kp = 120.0
+hold_kd = 3.0
+
+[[joint]]
+name = "joint3"
+id = 3
+model = "rs-06"
+g_scale = 1.00   # fitted 2026-08-25 (10 captures, rms 0.05)
+tau_max = 10.0
+kd_drag = 0.5
+fric_comp = 0.0
+hold_kp = 120.0
+hold_kd = 3.0
+
+[[joint]]
+name = "joint4"
+id = 4
+model = "rs-00"
+g_scale = 1.03   # fitted 2026-08-25 (10 captures, rms 0.06)
+tau_max = 3.5
+kd_drag = 0.05
+fric_comp = 0.0    # user preference 2026-08-26: no friction feed-forward
+hold_kp = 40.0
+hold_kd = 1.0
+
+[[joint]]
+name = "joint5"
+id = 5
+model = "rs-00"
+g_scale = 1.0
+kp_drag = 0.0    # gravity on j5 is below friction in normal poses; set ~3.0 if the backlash sag when releasing bothers you
+tau_max = 2.0
+kd_drag = 0.05
+fric_comp = 0.0
+hold_kp = 20.0
+hold_kd = 0.6
+
+[[joint]]
+name = "joint6"
+id = 6
+model = "rs-00"
+g_scale = 1.0
+tau_max = 1.5
+kd_drag = 0.05
+fric_comp = 0.0
+hold_kp = 20.0
+hold_kd = 0.6
+
+[gripper]
+id = 7
+model = "rs-00"
+tau_max = 1.5
+hold_kp = 8.0
+hold_kd = 0.5
+
+# ---------------------------------------------------------------------------------------------
+# Teleoperation with the Seeed reBot Arm 102 leader (7 Fashion Star UART servos on a CH340 port)
+# follower_deg = direction * (leader_deg - offset); mapping from Seeed's lerobot-robot-seeed-b601.
+# offsets are written by `scripts/teleop.py calibrate` into config/leader_calib.json.
+[leader]
+port = "/dev/cu.usbserial-130"
+baudrate = 1000000
+ids = [0, 1, 2, 3, 4, 5, 6]                       # shoulder_pan, shoulder_lift, elbow, wrist_flex, wrist_yaw, wrist_roll, gripper
+ranges = [[-150, 150], [-1, 170], [-200, 1], [-80, 90], [-90, 90], [-130, 130], [0, 270]]   # leader deg, for multi-turn unwrap
+directions = [1.0, 1.0, -1.0, -1.0, -1.0, 1.0, 6.0]
+stale_s = 0.2
+
+[teleop]
+kp = [50.0, 50.0, 50.0, 30.0, 50.0, 50.0]        # MIT tracking gains (Seeed's teleop values) + calibrated gravity ff
+kd = [3.0, 5.0, 5.0, 3.0, 4.0, 4.0]
+limits_deg = [[-145, 145], [0, 170], [0, 200], [-80, 90], [-90, 90], [-130, 130]]
+max_vel = 4.0              # rad/s: follower target rate limit while tracking
+vel_ff = true              # send target velocity in the MIT frame; without it kd brakes the motion (lag = kd/kp per rad/s)
+vel_tau = 0.04             # s: low-pass on the target velocity
+lead_s = 0.03              # s: predict the target ahead to cover leader-sample age + loop + feedback latency
+engage_vel = 0.4           # rad/s: approach speed of the ENGAGE phase (no jumps, ever)
+max_engage_deg = 90.0      # refuse to start if a joint is further than this from the leader
+jump_deg = 30.0            # leader change per sample treated as a read glitch
+gripper_limits_deg = [0.0, 270.0]
+gripper_kp = 12.0          # host-side gripper impedance (force-limited grasp), from Seeed
+gripper_kd = 0.05
+gripper_tau_max = 3.5
+gripper_tau_hold = 1.0

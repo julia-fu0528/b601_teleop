@@ -1,0 +1,11 @@
+# python
+__pycache__/
+*.pyc
+.venv/
+# telemetry logs (large); keep the calibration captures
+*.csv
+!calib.csv
+# per-machine leader calibration is worth keeping, comment out to exclude
+# config/leader_calib.json
+.DS_Store
+*.log
