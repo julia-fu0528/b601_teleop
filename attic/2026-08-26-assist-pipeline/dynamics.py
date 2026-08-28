@@ -52,22 +52,17 @@ class ArmDynamics:
         """Feed-forward: g(q) * g_scale + g_bias (per-joint calibration)."""
         return self.gravity_raw(q) * self.g_scale + self.g_bias
 
-    def ee_jacobian(self, q: np.ndarray, frame: str = "world") -> np.ndarray:
-        """6 x nq Jacobian of the gripper_end frame (rows: linear xyz, angular xyz).
-        frame="world": world-aligned axes; frame="local": tool axes (x = roll/j6 axis)."""
-        ref = pin.LOCAL_WORLD_ALIGNED if frame == "world" else pin.LOCAL
+    def inverse_dynamics(self, q: np.ndarray, v: np.ndarray, a: np.ndarray) -> np.ndarray:
+        """M(q)a + C(q,v)v + g_calibrated(q) via RNEA (N.m): the torque the rigid-body
+        model needs for this motion, with the fitted per-joint gravity calibration."""
+        tau = np.asarray(pin.rnea(self.model, self.data, np.asarray(q, dtype=float),
+                                  np.asarray(v, dtype=float), np.asarray(a, dtype=float)))
+        return tau - self.gravity_raw(q) + self.gravity(q)
+
+    def ee_jacobian(self, q: np.ndarray) -> np.ndarray:
+        """6 x nq Jacobian of the gripper_end frame, world-aligned axes (rows: linear xyz, angular xyz)."""
         return np.array(pin.computeFrameJacobian(
-            self.model, self.data, np.asarray(q, dtype=float), self._ee_fid, ref))
-
-    def mass_matrix(self, q: np.ndarray) -> np.ndarray:
-        """Joint-space inertia M(q) of the URDF links (no reflected rotor inertia), symmetrized."""
-        M = pin.crba(self.model, self.data, np.asarray(q, dtype=float))
-        return np.triu(M) + np.triu(M, 1).T
-
-    def coriolis(self, q: np.ndarray, v: np.ndarray) -> np.ndarray:
-        """Coriolis matrix C(q, qd) with the Christoffel property Mdot = C + C^T."""
-        return np.array(pin.computeCoriolisMatrix(
-            self.model, self.data, np.asarray(q, dtype=float), np.asarray(v, dtype=float)))
+            self.model, self.data, np.asarray(q, dtype=float), self._ee_fid, pin.LOCAL_WORLD_ALIGNED))
 
     def limit_violation(self, q: np.ndarray, margin: float = 0.0) -> np.ndarray:
         """Per-joint distance outside [lower+margin, upper-margin] (0 when inside)."""
