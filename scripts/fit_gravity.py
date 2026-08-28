@@ -27,10 +27,19 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("csv")
     ap.add_argument("--bias", action="store_true", help="also fit a constant torque offset per joint")
+    ap.add_argument("--rows", help="fit only these captures, python slice syntax (1-based), e.g. '32:' = from "
+                                   "capture 32 on, '1:10' = the first batch; global fits average incompatible "
+                                   "pose regions - prefer fitting the region you actually drag in")
     ap.add_argument("--config", default=str(ROOT / "config" / "b601_rs.toml"))
     args = ap.parse_args()
     cfg = load_config(args.config)
     rows = list(csv.DictReader(open(args.csv)))
+    if args.rows:
+        a, _, b = args.rows.partition(":")
+        lo = int(a) - 1 if a else 0
+        hi = int(b) if b else len(rows)
+        rows = rows[lo:hi]
+        print(f"using captures {lo + 1}..{lo + len(rows)}")
     n = len(cfg.joints)
     if not rows:
         raise SystemExit("no captures in file")
