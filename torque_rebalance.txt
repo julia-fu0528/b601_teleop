@@ -1,0 +1,171 @@
+================================================================================
+TORQUE REBALANCE - math and algorithm
+b601_teleop / b601/assist.py :: TorqueRebalance          (designed 2026-08-26)
+================================================================================
+
+GOAL
+  Isotropic drag feel: a hand force at the gripper should translate the EE the
+  same way in every direction, instead of escaping as cheap wrist rotation.
+
+NOTATION
+  q  in R^6        joint positions            (joint1 .. joint6)
+  qd in R^6        joint velocities (finite-difference estimate)
+  Jv in R^{3x6}    position Jacobian of gripper_end, world frame:  v_ee = Jv qd
+                   column Jv_i = direction & lever with which joint i moves the EE
+  UP   = joints 1..3   (base / shoulder: "upstream",   indices [:3])
+  DOWN = joints 4..6   (wrist:           "downstream", indices [3:])
+  B = Jv[:, :3]        upstream columns
+  W = Jv[:, 3:]        downstream columns
+  o  = elementwise product;  lowpass_T(x_raw): x += (dt / (T + dt)) (x_raw - x)
+
+PHYSICAL BACKGROUND (why the wrist "does everything")
+  A hand force F at the EE loads EVERY joint at once through the transpose map
+        tau_i = Jv_i . F                                  (virtual work: J^T F)
+  Joint i yields only when |tau_i| exceeds its own breakaway friction brk_i.
+  The chain yields at its weakest link: the wrist crosses its threshold at a
+  lower push force (lower friction, and for radial pushes a bigger lever), the
+  gripper then follows the hand, and the contact force plateaus BELOW the base
+  joints' threshold. The base never sees enough torque, no matter the intent.
+  Extra asymmetry while moving: qd_i = (Jv_i.F - fric_i) / kd_i, and the wrist's
+  (lever/kd) slope is ~20x the shoulder's, so it supplies the hand's motion first.
+
+--------------------------------------------------------------------------------
+STEP 1 - MEASURE the external torque on the downstream joints
+--------------------------------------------------------------------------------
+  External torque is observable only through BACKDRIVE: a stuck joint hides it
+  inside its static friction band, and in free-float drag (kp = 0) the motor
+  does not resist a push, so motor-torque feedback cannot see it either.
+  While a joint moves, the hand torque on it is what sustains the motion:
+
+        tau_dn = fric_dn o tanh(qd_dn / v0) + kd_dn o qd_dn        in R^3
+        tau_dn <- lowpass_{tau_f}(tau_dn)                          (zero at rest)
+
+  fric_dn = [0.30, 0.21, 0.21] N.m  (Seeed friction sweep, j4/j5/j6)
+  kd_dn   = the kd_drag actually commanded on j4..j6 (default 0.05)
+
+--------------------------------------------------------------------------------
+STEP 2 - INFER the external torque on the upstream joints (Jacobian)
+--------------------------------------------------------------------------------
+  The upstream joints are the stuck ones, so their external torque cannot be
+  measured; it is reconstructed. The hand force that explains the downstream
+  torques is the damped least-squares solution of  W^T F = tau_dn :
+
+        A      = W^T                          (3x3, rows = downstream joints)
+        F_hat  = (A^T A + lambda^2 I)^-1 A^T tau_dn                in R^3
+        tau_up = B^T F_hat                                         in R^3
+
+  Observability caveat: only the force component in the span of the BACKDRIVING
+  joints' lever rows is recoverable (minimum-norm elsewhere). One yielding wrist
+  joint => 1-D information: e.g. a pure-outward push and an out-and-up push give
+  identical j4 torque and are indistinguishable. This is why step 4 does NOT
+  take its direction from F_hat.
+
+--------------------------------------------------------------------------------
+STEP 3 - COMPARE the halves  ->  transfer gate w
+--------------------------------------------------------------------------------
+  Wrong comparisons (both tried, both rejected):
+   - raw torque vs raw torque: a joint yields against its OWN breakaway; for
+     lateral pushes joint1 receives MORE raw torque than joint5 and still loses.
+   - threshold-normalized loading vs loading: the step-2 ambiguity inflates the
+     inferred upstream loading, and a loaded-but-stuck joint is not helping
+     anyway - loading is not carriage.
+
+  Robust comparison - what each half is actually DOING:
+
+        r_down   = max_i |tau_dn_i| / brk_dn_i          ~1 while the wrist backdrives
+        carry_up = |B qd_up| / (|B qd_up| + |W qd_dn| + eps)
+                                                        upstream share of EE speed
+        w        = clip(r_down, 0, 1) * (1 - carry_up)  in [0, 1]
+
+  w ~ 1  : wrist is carrying the push alone            -> transfer fully
+  w -> 0 : upstream half has taken over the motion     -> stop pushing it
+  w = 0  : no hand at all                              -> no output
+
+--------------------------------------------------------------------------------
+STEP 4 - TRANSFER torque to the upstream joints (J^T size, J+ direction)
+--------------------------------------------------------------------------------
+  The two Jacobian maps answer different questions and can DISAGREE IN SIGN in
+  skewed geometry (folded-wrist radial push: a force along the motion loads j2
+  negative, but j2 must rotate positive to carry that motion):
+        J^T F : torque the force EXERTS on a joint      (statics)
+        J+ u  : rotation the joint needs to CARRY u     (kinematics)
+  So: per-joint direction pattern from the motion-carry map, magnitude from the
+  sensed force.
+
+        u_m     = W qd_dn / |W qd_dn|          EE direction the wrist is carrying
+        p       = B^T (B B^T + lambda^2 I)^-1 u_m       upstream rates carrying u_m
+        F_equiv = (B B^T ... DLS) p            EE force the pattern p corresponds to
+                  i.e. solve  B^T F_equiv = p  by damped least squares
+        s       = gain * |F_hat| / |F_equiv|   so the pattern's EE force
+                                               equals gain x the sensed hand force
+        tau_tx  = clip( lowpass_{tau_f}( w * s * p ), +-tau_max )   per joint 1..3
+
+  Injected into the drag torque:  tau_cmd = g(q) + fric_comp o tanh(qd/0.08) + tau_tx
+
+SAFETY PROPERTIES (all tested in tests/test_assist.py)
+  - zero at rest: no backdrive => tau_dn = 0, w = 0, u_m undefined => no output
+  - bounded: |EE-equivalent force| <= gain x sensed hand force; per-joint tau_max
+    cap; controller's per-joint clamp and vel_abort freeze remain as backstops
+  - self-fading: gate closes as the upstream half takes the motion over, and the
+    u_m source vanishes when the wrist stops slipping
+  - no wrong-way pressing: every driven joint aids the observed motion (J+ sign)
+  - no rate targets, no integrator, no added damping
+
+--------------------------------------------------------------------------------
+PSEUDOCODE (per control cycle, 100 Hz, DRAG phase only)
+--------------------------------------------------------------------------------
+  state: tau_dn = 0 (R^3), tau_tx = 0 (R^3)     # low-pass filter states
+
+  update(q, qd, dt):
+      Jv = jacobian(q)[:3]                      # 3x6
+      B, W = Jv[:, :3], Jv[:, 3:]
+
+      # step 1: measure downstream external torque from backdrive
+      raw    = fric_dn * tanh(qd[3:] / v0) + kd_dn * qd[3:]
+      tau_dn = lowpass(tau_dn, raw, tau_f, dt)
+
+      # step 2: infer hand force and upstream received torque
+      A      = W.T
+      F_hat  = solve(A.T A + lam2*I3, A.T tau_dn)
+      tau_up = B.T @ F_hat                      # displayed; sizing input
+
+      # step 3: compare halves -> gate
+      r_down   = max(|tau_dn| / brk_dn)
+      carry_up = |B qd[:3]| / (|B qd[:3]| + |W qd[3:]| + eps)
+      w        = clip(r_down, 0, 1) * (1 - carry_up)
+
+      # step 4: transfer (J^T size, J+ direction)
+      v_dn = W @ qd[3:]
+      if |v_dn| < 1e-4:  raw_tx = 0
+      else:
+          u_m     = v_dn / |v_dn|
+          p       = B.T @ solve(B B.T + lam2*I3, u_m)
+          F_equiv = solve(A_up.T A_up + lam2*I3, A_up.T p)   with A_up = B.T
+          s       = gain * |F_hat| / |F_equiv|
+          raw_tx  = w * s * p
+      tau_tx = clip(lowpass(tau_tx, raw_tx, tau_f, dt), -tau_max, tau_max)
+
+      return [tau_tx, 0, 0, 0]                  # torque on joints 1..3 only
+
+PARAMETERS (defaults)
+  gain     = 2.0     force multiplication wrist -> base (--assist-gain)
+  tau_max  = 1.2     N.m cap per upstream joint (the --assist TAU argument)
+  fric_dn  = [0.30, 0.21, 0.21] N.m   wrist Coulomb friction (Seeed sweep)
+  brk_dn   = fric_dn                  downstream breakaway (same table)
+  kd_dn    = [0.05, 0.05, 0.05]       wrist kd_drag actually commanded
+  v0       = 0.08    rad/s   tanh knee (above finite-difference velocity noise)
+  tau_f    = 0.1     s       low-pass time constant (measurement and output)
+  lambda   = 0.05    m       damping of every least-squares solve (lam2 = 0.0025)
+
+RESULTS (sim, identical 2 N pushes at the folded-wrist pose q = [0,1.08,1.22,-1,0,0])
+  EE travel      plain      rebalanced
+  lateral        0.263 m    0.269 m
+  radial         0.085 m    0.148 m     (the joint4 direction: +74%)
+  vertical       0.233 m    0.233 m
+  direction spread 3.1x -> 1.8x; high-stiction j1 (0.8 N.m) recruited with peak
+  0.49 N.m transfer, zero torque sign flips, stops with the hand.
+
+RUN
+  python scripts/gravity_drag.py drag --assist 1.2 [--assist-gain 2]
+  status line:  tau_dn <j4 j5 j6>  ->  tau_up <j1 j2 j3>   w <gate>   tx <j1 j2 j3>
+================================================================================
