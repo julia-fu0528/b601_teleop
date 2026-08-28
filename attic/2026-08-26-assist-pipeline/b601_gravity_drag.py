@@ -16,13 +16,8 @@ Phases
   DONE
 
   FRICTION (key f, from DRAG) like CAPTURE but a larger, slower sweep (+/- 0.15 rad at ~0.15 rad/s) whose
-          PD residual is split by direction of motion: kinetic Coulomb friction = (resid+ - resid-)/2 per joint.
-  STATIC  (key s, from DRAG) breakaway-friction sweep: joints one at a time, all others held stiff; the free
-          joint's torque ramps slowly until it moves 8 mrad, in both directions. Static friction =
-          (tau+ + |tau-|)/2 (the gravity residual cancels). Prints paste-ready fric_static/fric_kinetic
-          config lines when done. Hands off during the sweep (~10 s per joint).
-Keys while running (type + Enter): d = drag, h = hold, c = capture, f = friction sweep, s = static-friction sweep, r = release, q! = disable NOW.
-With --balance also: m <kg> = set virtual mass, i <kg.m^2> = set virtual rot. inertia, + / - = 25 % heavier / lighter.
+          PD residual is split by direction of motion: Coulomb friction = (resid+ - resid-)/2 per joint.
+Keys while running (type + Enter): d = drag, h = hold, c = capture, f = friction sweep, r = release, q! = disable NOW.
 Ctrl+C: DRAG/RAMP -> HOLD, HOLD -> RELEASE, RELEASE -> disable now.
 """
 from __future__ import annotations
@@ -50,7 +45,6 @@ class Phase(enum.Enum):
     HOLD = "hold"
     RELEASE = "release"
     CAPTURE = "capture"
-    STATIC = "static"
     DONE = "done"
 
 
@@ -71,7 +65,6 @@ class GravityDragController:
         auto_release: bool = False,
         log_path: str | None = None,
         calib_path: str | None = None,
-        fric_path: str | None = None,
         capture_s: float = 5.0,
         capture_amp: float = 0.05,
         print_every: float = 0.5,
@@ -97,7 +90,6 @@ class GravityDragController:
         self.auto_release = auto_release
         self.log_path = log_path
         self.calib_path = calib_path
-        self.fric_path = fric_path
         self.capture_s = float(capture_s)
         self.capture_amp = float(capture_amp)
         self.captures: list[dict] = []
@@ -107,7 +99,9 @@ class GravityDragController:
         self.startup_failed = False
         self.hold_timeout = hold_timeout   # HOLD -> RELEASE automatically after this many s (None = wait for operator)
         self.t_hold: float | None = None
-        self.assist = assist               # TorqueRebalance or None (b601/assist.py)
+        self.assist = assist               # TorqueRebalance / DynamicAssist or None (b601/assist.py)
+        self._tau_sent = np.zeros(self.n)  # feed-forward actually sent last cycle (post-clip)
+        self._kd_sent = np.array([j.hold_kd for j in cfg.joints], float)
 
         self.loop = cfg.loop
         self.dt_nom = 1.0 / self.loop.rate_hz
@@ -150,62 +144,6 @@ class GravityDragController:
                   f"*** The arm is now STIFF ON PURPOSE (PD hold + gravity feed-forward, not torque-off).\n"
                   f"*** Type  d + Enter  to go back to DRAG,  r + Enter  to release (fade & disable),  q! + Enter  to disable NOW.")
 
-    def _append_fric(self, kind: str, pose_q, vals, resid) -> None:
-        """Append one sweep (kinetic 'f' or static 's') to the friction CSV so several
-        poses can be aggregated with scripts/fit_friction.py."""
-        if not self.fric_path:
-            return
-        new = not os.path.exists(self.fric_path)
-        with open(self.fric_path, "a", newline="") as cf:
-            w = csv.writer(cf)
-            if new:
-                w.writerow(["kind"] + [f"q{i+1}" for i in range(self.n)]
-                           + [f"f{i+1}" for i in range(self.n)] + [f"resid{i+1}" for i in range(self.n)])
-            w.writerow([kind] + [f"{x:.5f}" for x in pose_q]
-                       + [f"{x:.4f}" for x in vals] + [f"{x:.4f}" for x in resid])
-        self._say(f"  appended to {self.fric_path} (repeat at 4-6 spread poses, then scripts/fit_friction.py)")
-
-    def _static_init(self, q, t) -> None:
-        """Key 's': measure breakaway (static) friction per active joint, both directions."""
-        self._st_joints = [i for i in range(self.n) if self.active[i]]
-        self._st_ji = 0
-        self._st_stage = "settle"
-        self._st_dir = 1
-        self._st_tau = 0.0
-        self._st_anchor = 0.0
-        self._st_hold = q.copy()
-        self._st_t = t
-        self._st_res: dict[int, dict[int, float]] = {}
-        big = np.array([j.model == "rs-06" for j in self.cfg.joints])
-        self._st_rate = np.where(big, 0.25, 0.12)   # N.m/s torque ramp
-        self._st_cap = np.where(big, 2.0, 1.0)      # give up beyond this (limit / contact)
-        self.phase = Phase.STATIC
-        self._say(f"  static sweep: {self.cfg.joint_names[self._st_joints[0]]}")
-
-    def _static_finish(self, names) -> None:
-        self.static_result = np.full(self.n, np.nan)
-        resid = np.full(self.n, np.nan)
-        kin = np.array([j.fric_kinetic for j in self.cfg.joints], float)
-        if getattr(self, "friction_result", None) is not None:
-            kin = np.where(np.isfinite(self.friction_result), self.friction_result, kin)
-        lines = ["static-friction sweep done (breakaway torque per joint):",
-                 "  joint    tau+     tau-     f_static  g-resid   kinetic('f'/config)"]
-        for i in self._st_joints:
-            tp = self._st_res.get(i, {}).get(1, float("nan"))
-            tm = self._st_res.get(i, {}).get(-1, float("nan"))
-            self.static_result[i] = 0.5 * (tp + tm)
-            resid[i] = 0.5 * (tm - tp)
-            lines.append(f"  {names[i]:8s} {tp:+.3f}   {-tm:+.3f}   {self.static_result[i]:8.3f} "
-                         f"{resid[i]:+8.3f}   {kin[i] if kin[i] > 0 else float('nan'):8.3f}")
-        lines.append("paste into config/b601_rs.toml under each [[joint]] (raw values; the 85 % factor")
-        lines.append("is applied at runtime by --balance-fric):")
-        for i in self._st_joints:
-            kin_s = f"  fric_kinetic = {kin[i]:.2f}" if kin[i] > 0 else "  # fric_kinetic: run the 'f' sweep"
-            lines.append(f"  {names[i]:8s}: fric_static = {self.static_result[i]:.2f}{kin_s}")
-        lines.append("sanity: f_static >= kinetic; a large |g-resid| means the gravity model is off at this pose")
-        self._say("\n".join(lines))
-        self._append_fric("static", self._st_hold, self.static_result, resid)
-
     # ---- main ----------------------------------------------------------------------------
     def run(self) -> Phase:
         arm, dyn, cfg = self.arm, self.dyn, self.cfg
@@ -236,8 +174,7 @@ class GravityDragController:
             writer = csv.writer(logf)
             writer.writerow(["t", "phase"] + [f"q{i+1}" for i in range(n)] + [f"v{i+1}" for i in range(n)]
                             + [f"tau{i+1}" for i in range(n)] + [f"torq{i+1}" for i in range(n)]
-                            + [f"velfb{i+1}" for i in range(n)] + ["t_rotor_max"]
-                            + ([f"r{i+1}" for i in range(n)] if hasattr(self.assist, "r") else []))
+                            + [f"velfb{i+1}" for i in range(n)] + ["t_rotor_max"])
 
         arm.prepare_mit(self.active, self.gripper_hold)
         arm.enable(self.active, self.gripper_hold)
@@ -290,7 +227,7 @@ class GravityDragController:
                     except queue.Empty:
                         break
                     if c == "<sigint>":
-                        if self.phase in (Phase.RAMP, Phase.FADE, Phase.DRAG, Phase.CAPTURE, Phase.STATIC):
+                        if self.phase in (Phase.RAMP, Phase.FADE, Phase.DRAG, Phase.CAPTURE):
                             self._freeze(q, "Ctrl+C")
                         elif self.phase is Phase.HOLD:
                             self._say("Ctrl+C in HOLD -> RELEASE (torque fade, then disable)")
@@ -321,13 +258,6 @@ class GravityDragController:
                                 self._say(f"CAPTURE: holding {self.capture_s}s, measuring the PD residual — hands off")
                         else:
                             self._say("capture/friction only work from DRAG (type d first)")
-                    elif c in ("s", "static"):
-                        if self.phase is Phase.DRAG:
-                            self._static_init(q, t)
-                            self._say("STATIC-FRICTION sweep: one joint at a time ramps torque until breakaway, "
-                                      "both directions, others held stiff — hands OFF (~10 s per joint)")
-                        else:
-                            self._say("static sweep only works from DRAG (type d first)")
                     elif c in ("r", "release"):
                         if self.phase in (Phase.HOLD, Phase.DRAG):
                             self.q_hold = q.copy()
@@ -337,21 +267,6 @@ class GravityDragController:
                         self._say("EMERGENCY: disabling all motors NOW (arm may fall)")
                         arm.disable_all()
                         self.phase = Phase.DONE
-                    elif self.assist is not None and hasattr(self.assist, "set_target") \
-                            and (c in ("+", "-") or c[:1] in ("m", "i")):
-                        try:
-                            if c == "+":
-                                md, ir = self.assist.set_target(scale=1.25)   # heavier
-                            elif c == "-":
-                                md, ir = self.assist.set_target(scale=0.8)    # lighter
-                            else:
-                                val = float(c[1:].lstrip(" ="))
-                                md, ir = (self.assist.set_target(m_d=val) if c[0] == "m"
-                                          else self.assist.set_target(i_rot=val))
-                            self._say(f"virtual inertia target -> {md:.2f} kg / {ir:.3f} kg.m^2 "
-                                      f"(slews in over ~0.5 s)")
-                        except ValueError:
-                            self._say("usage: m <kg> | i <kg.m^2> | + (heavier) | - (lighter), e.g. 'm 2.0'")
                     elif c == "":
                         self._status(t - t0, q, v, tau_cmd, torq, t_rot, cycles / max(t - t0, 1e-6))
                 if self.phase is Phase.DONE:
@@ -407,7 +322,8 @@ class GravityDragController:
                         # gravity + Coulomb-friction feed-forward in the direction of motion
                         tau_cmd = g + self.fric_comp * np.tanh(v / self.fric_v0)
                         if self.assist is not None:
-                            tau_cmd = tau_cmd + self.assist.update(q, v, dt)
+                            tau_cmd = tau_cmd + self.assist.update(q, v, dt, tau_sent=self._tau_sent,
+                                                                   kd_sent=self._kd_sent)
                 if self.phase is Phase.CAPTURE:
                     el = t - t_phase
                     friction_mode = getattr(self, "_cap_mode", "calib") == "friction"
@@ -441,10 +357,8 @@ class GravityDragController:
                         coulomb = 0.5 * (rp - rn)
                         ref = np.array([0.53, 0.53, 0.49, 0.30, 0.21, 0.21])   # Seeed 2026-07-17 (j1/j6 assumed like neighbours)
                         self._say("friction sweep at q(deg)=%s\n   Coulomb friction (N.m): %s\n   Seeed reference     : %s\n   gravity residual    : %s"
-                                  "\n   paste into config/b601_rs.toml: fric_kinetic = <value> under each [[joint]]"
                                   % (np.round(np.degrees(self.q_hold), 0), np.round(coulomb, 2), ref, np.round(0.5 * (rp + rn), 2)))
                         self.friction_result = coulomb
-                        self._append_fric("kinetic", self.q_hold, coulomb, 0.5 * (rp + rn))
                         self.phase, t_phase = Phase.DRAG, t
                         vel.reset()
                         self._say("back to DRAG")
@@ -467,51 +381,6 @@ class GravityDragController:
                         self.phase, t_phase = Phase.DRAG, t
                         vel.reset()
                         self._say("back to DRAG")
-                if self.phase is Phase.STATIC:
-                    pos = self._st_hold
-                    kp = self.hold_kp.copy()
-                    kd = self.hold_kd.copy()
-                    tau_cmd = g.copy()
-                    j = self._st_joints[self._st_ji]
-                    el = t - self._st_t
-                    if self._st_stage == "settle":
-                        if el >= 0.8:
-                            self._st_stage, self._st_t = "ramp", t
-                            self._st_tau, self._st_anchor = 0.0, q[j]
-                            self._st_hold[j] = q[j]
-                    elif self._st_stage == "ramp":
-                        kp[j] = 0.0                       # free joint: gravity ff + ramped extra torque only
-                        kd[j] = self.kd_drag[j]           # light damping bounds the post-breakaway motion
-                        self._st_tau += self._st_dir * self._st_rate[j] * dt
-                        tau_cmd[j] += self._st_tau
-                        if abs(q[j] - self._st_anchor) > 0.008:
-                            self._st_res.setdefault(j, {})[self._st_dir] = abs(self._st_tau)
-                            self._st_hold[j] = q[j]
-                            self._st_stage, self._st_t = "rehold", t
-                        elif abs(self._st_tau) > self._st_cap[j]:
-                            self._st_res.setdefault(j, {})[self._st_dir] = float("nan")
-                            self._say(f"  {names[j]}: no breakaway at {self._st_cap[j]:.2f} N.m "
-                                      f"(dir {self._st_dir:+d}) — near a limit or in contact?")
-                            self._st_hold[j] = q[j]
-                            self._st_stage, self._st_t = "rehold", t
-                    elif self._st_stage == "rehold":
-                        if el >= 0.8:
-                            if self._st_dir > 0:
-                                self._st_dir = -1
-                                self._st_stage, self._st_t = "ramp", t
-                                self._st_tau, self._st_anchor = 0.0, q[j]
-                                self._st_hold[j] = q[j]
-                            else:
-                                self._st_dir = 1
-                                self._st_ji += 1
-                                if self._st_ji >= len(self._st_joints):
-                                    self._static_finish(names)
-                                    self.phase, t_phase = Phase.DRAG, t
-                                    vel.reset()
-                                    self._say("back to DRAG")
-                                else:
-                                    self._st_stage, self._st_t = "settle", t
-                                    self._say(f"  static sweep: {names[self._st_joints[self._st_ji]]}")
                 if self.phase is Phase.HOLD:
                     pos = self.q_hold
                     kp = self.hold_kp
@@ -532,11 +401,10 @@ class GravityDragController:
                         self._say("released: all motors disabled")
                         break
 
-                if self.assist is not None and self.phase is not Phase.DRAG and hasattr(self.assist, "observe"):
-                    self.assist.observe(q, v, dt)   # keep the estimator running while held
-
                 # ---- send
                 tau_cmd = np.clip(tau_cmd, -self.tau_max, self.tau_max)
+                self._tau_sent = tau_cmd.copy()
+                self._kd_sent = np.asarray(kd, float).copy()
                 try:
                     arm.send_mit(pos, velcmd, kp, kd, tau_cmd, self.active)
                     if self.gripper_hold:
@@ -546,8 +414,6 @@ class GravityDragController:
                     fails += 1
                     if fails >= self.loop.max_read_failures:
                         self._freeze(q, f"send failures ({e})")
-                if self.assist is not None and hasattr(self.assist, "note_sent"):
-                    self.assist.note_sent(tau_cmd, kp, kd, pos, velcmd)
 
                 # ---- telemetry from the feedback frames
                 torq = src.torq
@@ -557,8 +423,7 @@ class GravityDragController:
                 if writer is not None:
                     writer.writerow([f"{t - t0:.4f}", self.phase.value] + [f"{x:.5f}" for x in q]
                                     + [f"{x:.4f}" for x in v] + [f"{x:.4f}" for x in tau_cmd]
-                                    + [f"{x:.3f}" for x in torq] + [f"{x:.4f}" for x in src.vel_fb] + [f"{t_rot:.1f}"]
-                                    + ([f"{x:.4f}" for x in self.assist.r] if hasattr(self.assist, "r") else []))
+                                    + [f"{x:.3f}" for x in torq] + [f"{x:.4f}" for x in src.vel_fb] + [f"{t_rot:.1f}"])
                 if self.print_every and (t - t_print) >= self.print_every:
                     t_print = t
                     self._status(t - t0, q, v, tau_cmd, torq, t_rot, cycles / max(t - t0, 1e-6))

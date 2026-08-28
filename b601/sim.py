@@ -30,7 +30,8 @@ class SimArm:
         dt: float,
         *,
         inertia: np.ndarray | None = None,
-        coulomb: float = 0.3,
+        coulomb: float | np.ndarray = 0.3,
+        static: float | np.ndarray | None = None,
         viscous: float = 0.05,
         truth_scale: float = 1.0,
         external: Callable[[float, np.ndarray], np.ndarray] | None = None,
@@ -42,7 +43,8 @@ class SimArm:
         self.v = np.zeros(self.n)
         self.dt = float(dt)
         self.I = np.array([0.05, 0.25, 0.12, 0.02, 0.01, 0.005]) if inertia is None else np.asarray(inertia, float)
-        self.coulomb = float(coulomb)
+        self.coulomb = np.asarray(coulomb, dtype=float)   # kinetic (sliding), scalar or per-joint
+        self.static = self.coulomb if static is None else np.asarray(static, dtype=float)  # breakaway level
         self.viscous = float(viscous)
         self.truth_scale = float(truth_scale)
         self.external = external
@@ -107,7 +109,7 @@ class SimArm:
             net = tau_cmd - g_true + ext
             # Coulomb + viscous friction with simple stiction
             fric = self.coulomb * np.tanh(self.v / 0.02) + self.viscous * self.v
-            stuck = (np.abs(self.v) < 1e-3) & (np.abs(net) < self.coulomb)
+            stuck = (np.abs(self.v) < 1e-3) & (np.abs(net) < self.static)
             acc = np.where(stuck, 0.0, (net - fric) / self.I)
             self.v = np.where(stuck, 0.0, self.v + acc * h)
             self.q = self.q + self.v * h

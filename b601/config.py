@@ -17,6 +17,10 @@ class JointCfg:
     kd_drag: float = 0.0
     kp_drag: float = 0.0     # optional stiffness while dragging (e.g. to hide wrist backlash)
     fric_comp: float = 0.0   # Coulomb friction feed-forward while dragging, N.m (keep below the joint's real friction!)
+    fric_static: float = 0.0   # breakaway friction at zero load, N.m ('s' sweep; 0 = not calibrated)
+    fric_kinetic: float = 0.0  # sliding Coulomb friction at zero load, N.m ('f' sweep; 0 = not calibrated)
+    fric_static_mu: float = 0.0   # load slope: friction grows by mu * |g_j(q)| (fit_friction.py; 0 = constant)
+    fric_kinetic_mu: float = 0.0
     hold_kp: float = 10.0
     hold_kd: float = 0.5
 
