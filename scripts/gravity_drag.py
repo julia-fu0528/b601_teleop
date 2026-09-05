@@ -106,8 +106,8 @@ def cmd_drag(cfg, dyn, args) -> None:
         sus_arg = str(args.balance_sustain).strip().lower()
         if args.observe or sus_arg in ("none", "0", "off"):
             want = []
-        elif sus_arg in ("1", "on", "default"):
-            want = ["joint1"]
+        elif sus_arg in ("all", "1", "on", "default"):
+            want = list(cfg.joint_names)
         else:
             want = [w.strip() for w in args.balance_sustain.split(",")]
         bad = [w for w in want if w not in cfg.joint_names]
@@ -147,7 +147,9 @@ def cmd_drag(cfg, dyn, args) -> None:
         if np.any(mu_kin > 0) or np.any(mu_sta > 0):
             fric_src += ", load-dependent (f0 + mu*|g(q)|)"
         if np.any(sustain_mask) and fscale > 0:
-            fric_src += f"; sustained relief on {[n for n, m in zip(cfg.joint_names, sustain_mask) if m]} (margin 0.20)"
+            sus_names = [n for n, m in zip(cfg.joint_names, sustain_mask) if m]
+            fric_src += ("; sustained relief on ALL joints (margin-capped)" if len(sus_names) == len(cfg.joint_names)
+                         else f"; sustained relief on {sus_names} (margin-capped)")
         if args.balance == 0.0 and fscale == 0.0:
             mode = "OBSERVE-ONLY (zero output; r on the status line / log)"
         elif args.balance == 0.0:
@@ -243,12 +245,12 @@ def main() -> None:
                         "roll stays natural until the rotor inertia is identified)")
     d.add_argument("--balance-fo", type=float, default=3.0, metavar="HZ",
                    help="observer bandwidth (Hz, default 3; higher is snappier but lowers the stable KAPPA)")
-    d.add_argument("--balance-sustain", default="joint1", metavar="JOINTS",
-                   help="1/0 (or on/off) toggles sustained relief on joint1; or a comma list of joints whose "
-                        "friction relief STAYS ON while they are clearly moving "
-                        "(> 0.1 rad/s), capped at (real kinetic friction - 0.20 N.m) so nothing can self-drive "
-                        "(default joint1: vertical axis, constant friction - fixes close-in lateral drags "
-                        "paying full base friction; 'none' = drive-gated everywhere)")
+    d.add_argument("--balance-sustain", default="all", metavar="JOINTS",
+                   help="1/0 (on/off) or a comma list of joints: friction relief STAYS ON while a joint is "
+                        "clearly moving (> 0.1 rad/s), capped at (real kinetic level at the pose - margin) so "
+                        "residual pushes below the margin still decelerate it (margins per joint, sized above "
+                        "the measured model residuals). Default all; 'none'/0 = drive-gated everywhere "
+                        "(relief only while out-pushing full friction)")
     d.add_argument("--balance-fric", default="0.85", metavar="S",
                    help="fraction [0..1] of the measured friction to compensate while moving, or on/off "
                         "(default 0.85; 0 = off). Uses fric_static/fric_kinetic from the config (Stribeck: breakaway level "

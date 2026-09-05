@@ -43,8 +43,8 @@ g_scale = 1.0
 tau_max = 3.0
 kd_drag = 0.15     # j1 has no gravity ff so it needs no runaway damping; low kd = glides like the wrist (was 0.5)
 fric_comp = 0.35   # plain drag / --assist only; --balance auto-disables it (gated ff below replaces it)
-fric_static = 0.54   # load-model fit 2026-08-28 (fit_friction.py; f = f0 + mu*|g(q)|)
-fric_kinetic = 0.56
+fric_static = 0.53     # friction_v2 fit 2026-09-05
+fric_kinetic = 0.52
 hold_kp = 20.0
 hold_kd = 1.5
 
@@ -52,14 +52,15 @@ hold_kd = 1.5
 name = "joint2"
 id = 2
 model = "rs-06"
-g_scale = 0.91   # batch-1 fit 2026-08-25 (10 captures, rms 0.02): user-validated by feel. Later refits
-g_bias = -0.21   # (b1+2/all: 0.97 no-bias; b1+3: 0.95/-0.19) trade the working region for stretched poses.
+g_scale = 0.94   # calib_v2 fit 2026-09-05, 65 captures incl. extended-high poses (rms 0.09 w/ offset)
+g_bias = -0.20   # bias across refits: -0.17 @31, -0.19 @43/@58, -0.20 @65
 tau_max = 18.0
 kd_drag = 0.5
 fric_comp = 0.35   # plain drag / --assist only; --balance auto-disables it (gated ff below replaces it)
-fric_static = 0.33   # load-model fit 2026-08-28 (fit_friction.py; f = f0 + mu*|g(q)|)
+fric_static = 0.17
+fric_static_mu = 0.059
 fric_kinetic = 0.48
-fric_kinetic_mu = 0.026
+fric_kinetic_mu = 0.018
 hold_kp = 120.0
 hold_kd = 3.0
 
@@ -67,12 +68,12 @@ hold_kd = 3.0
 name = "joint3"
 id = 3
 model = "rs-06"
-g_scale = 1.00   # batch-1 fit 2026-08-25 (rms 0.05); later refits gave 0.99, not adopted
+g_scale = 1.00   # calib_v2 fit 2026-08-31, 26 captures (rms 0.06)
 tau_max = 10.0
 kd_drag = 0.5
 fric_comp = 0.35   # plain drag / --assist only; --balance auto-disables it (gated ff below replaces it)
-fric_static = 0.55   # load-model fit 2026-08-28 (fit_friction.py; f = f0 + mu*|g(q)|)
-fric_kinetic = 0.72
+fric_static = 0.52     # NOTE: breakaway is direction-asymmetric by up to +/-0.4 depending on pose
+fric_kinetic = 0.68
 hold_kp = 120.0
 hold_kd = 3.0
 
@@ -80,14 +81,13 @@ hold_kd = 3.0
 name = "joint4"
 id = 4
 model = "rs-00"
-g_scale = 1.03   # batch-1 fit 2026-08-25 (rms 0.06); later refits: 1.02-1.04, all within noise
+g_scale = 1.00   # calib_v2 fit 2026-08-31 (rms 0.04)
 tau_max = 3.5
 kd_drag = 0.05
 fric_comp = 0.0
 fric_static = 0.13
-fric_static_mu = 0.050   # load-model fit 2026-08-28 (fit_friction.py; f = f0 + mu*|g(q)|)
-fric_kinetic = 0.26
-fric_kinetic_mu = 0.020
+fric_static_mu = 0.049
+fric_kinetic = 0.28
 hold_kp = 40.0
 hold_kd = 1.0
 
@@ -95,14 +95,14 @@ hold_kd = 1.0
 name = "joint5"
 id = 5
 model = "rs-00"
-g_scale = 1.0    # uncalibrated: j5 gravity never exceeds ~2x its friction in any capture batch; the batch-2
+g_scale = 0.84   # calib_v2 fit 2026-08-31 (rms 0.02; this batch had |g|max 0.85, best j5 leverage yet)
                  # 0.84 suggestion was below the meaningful-signal threshold
 kp_drag = 0.0    # gravity on j5 is below friction in normal poses; set ~3.0 if the backlash sag when releasing bothers you
 tau_max = 2.0
 kd_drag = 0.05
 fric_comp = 0.0
-fric_static = 0.23   # load-model fit 2026-08-28 (fit_friction.py; f = f0 + mu*|g(q)|)
-fric_kinetic = 0.25
+fric_static = 0.23
+fric_kinetic = 0.24
 hold_kp = 20.0
 hold_kd = 0.6
 
@@ -114,7 +114,7 @@ g_scale = 1.0
 tau_max = 1.5
 kd_drag = 0.05
 fric_comp = 0.0
-fric_static = 0.23   # load-model fit 2026-08-28 (fit_friction.py; f = f0 + mu*|g(q)|)
+fric_static = 0.21
 fric_kinetic = 0.25
 hold_kp = 20.0
 hold_kd = 0.6

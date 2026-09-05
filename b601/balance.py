@@ -42,6 +42,19 @@ import numpy as np
 FRIC = np.array([0.50, 0.50, 0.50, 0.30, 0.21, 0.21])
 # dead-band on r: ~2x the gravity-fit residual rms per joint (see calib.csv fits)
 R0 = np.array([0.10, 0.10, 0.10, 0.05, 0.05, 0.05])
+# sustain margins: while a joint merely coasts, friction relief is capped at
+# (real kinetic level at the pose) - margin, so any residual push smaller than the margin
+# still decelerates it. Sized above the residuals measured on this unit (static sweep
+# 2026-08-27: [0.15 0.23 0.23 0.10 0.08 0.14] N.m). Revisit after a gravity re-fit.
+# margins are SIGNED where the residual push is one-sided; sized from the friction_v2
+# static sweeps (10 poses, final gravity model, 2026-08-31) + headroom:
+#   j2: -0.27 worst (cable side) / +0.09  -> 0.35 / 0.20
+#   j3: +/-0.42 breakaway ASYMMETRY that flips with pose - that is a rest-time effect the
+#       drive gate already handles; sliding-time error is small (kinetic rms 0.06), so a
+#       symmetric 0.30 covers gravity + kinetic error + the low-speed Stribeck blend
+#   j1 0.16 mixed, j4 0.09, j5 one +0.15 outlier, j6 0.10
+SUSTAIN_MARGIN_POS = np.array([0.20, 0.35, 0.50, 0.12, 0.15, 0.16])   # applies while qd > 0
+SUSTAIN_MARGIN_NEG = np.array([0.20, 0.45, 0.50, 0.12, 0.15, 0.16])   # applies while qd < 0
 KAPPA_HARD_MAX = 2.0     # stability ceiling at ~90 Hz (see module docstring)
 
 
@@ -52,8 +65,8 @@ class BalancedDrag:
                  r0: np.ndarray | None = None, fric: np.ndarray | None = None,
                  f_static: np.ndarray | None = None, fric_mu: np.ndarray | None = None,
                  f_static_mu: np.ndarray | None = None, v_stribeck: float = 0.15,
-                 sustain_joints: np.ndarray | None = None, sustain_margin: float = 0.20,
-                 v_hold: float = 0.10,
+                 sustain_joints: np.ndarray | None = None,
+                 sustain_margin: np.ndarray | float | None = None, v_hold: float = 0.10,
                  v0: float = 0.08, ramp_s: float = 2.0, dls_lambda: float = 0.05,
                  bias_tau: float = 5.0, r_net_max: float = 3.0) -> None:
         if not 0.0 <= kappa <= KAPPA_HARD_MAX:
@@ -89,14 +102,25 @@ class BalancedDrag:
         self.level_max = 1.5    # N.m cap on any friction level (bad fit must not become a big ff)
         self._g_abs = np.zeros(self.n)
         self.v_stribeck = float(v_stribeck)
-        # sustained relief, per joint (default: none). Safe ONLY for joints where a released,
-        # coasting joint must merely decelerate - the relief is capped at (raw kinetic level
-        # at the pose) - sustain_margin, so any residual/bias below the margin cannot self-drive
-        # it. Enabled for j1 (vertical axis: no gravity, constant friction, bias ~0.15 < 0.20):
-        # its lever-arm makes close-in lateral drags pay full friction under a drive-only gate.
+        # sustained relief, per joint (default: none; CLI default: all). While a joint is
+        # clearly moving its relief stays on but capped at (raw kinetic level at the pose)
+        # - margin, so any residual/bias below the margin still decelerates an un-driven
+        # joint. j1's guarantee is structural (vertical axis: no gravity term at all);
+        # the others are empirical - margins sized above the measured residuals.
         self.sustain = (np.zeros(self.n, bool) if sustain_joints is None
                         else np.asarray(sustain_joints, bool))
-        self.sustain_margin = float(sustain_margin)
+        if sustain_margin is None:
+            self.margin_pos = SUSTAIN_MARGIN_POS[: self.n].copy()
+            self.margin_neg = SUSTAIN_MARGIN_NEG[: self.n].copy()
+        else:
+            sm = np.asarray(sustain_margin, float)
+            sm = np.full(self.n, float(sm)) if sm.ndim == 0 else sm
+            self.margin_pos = self.margin_neg = sm
+        # live mode toggles (keys b / bf / bs while running)
+        self.shaping_on = True
+        self.fric_on = True
+        self._fs = float(fric_scale)
+        self._sustain_cfg = self.sustain.copy()
         self.v_hold = float(v_hold)   # rad/s: motion clearly established (self-creep cannot reach it)
 
         self.r0 = R0[: self.n].copy() if r0 is None else np.asarray(r0, float)
@@ -167,24 +191,28 @@ class BalancedDrag:
         # sustain-enabled joints (j1) additionally keep margin-capped relief while clearly
         # moving, so steady sliding is relieved there without the hand over-pushing
         gate = np.clip(self.r * np.sign(v) / self.r0, 0.0, 1.0)
-        lvl = self.fric_curve(v)
+        lvl = self.fric_curve(v) if self.fric_on else np.zeros(self.n)
         t = np.tanh(v / self.v0)
         f_ff = t * (lvl * gate)
-        if self.sustain.any():
+        if self.fric_on and self.sustain.any():
             sus = np.clip((np.abs(v) - self.v_hold) / self.v_hold, 0.0, 1.0) * self.sustain
             raw_lvl = np.minimum(self._raw_kin + self._raw_mu * self._g_abs, self.level_max)
-            lvl_sus = np.clip(np.minimum(lvl, raw_lvl - self.sustain_margin), 0.0, None)
+            m_eff = np.where(v >= 0.0, self.margin_pos, self.margin_neg)
+            lvl_sus = np.clip(np.minimum(lvl, raw_lvl - m_eff), 0.0, None)
             f_ff = t * np.maximum(lvl * gate, lvl_sus * sus)
         # soft dead-band, then the drive the hand would have without the modelled friction
         r_db = np.sign(self.r) * np.maximum(np.abs(self.r) - self.r0, 0.0)
         r_net = np.clip(r_db + f_ff, -self.r_net_max, self.r_net_max)
 
-        K, cond = self._shaping_matrix(q)
-        sing = np.clip((40.0 - cond) / 15.0, 0.0, 1.0)      # fade out between cond(J) 25 and 40
         self._runaway_check(v, r_net, dt)
-        self.alpha = min(1.0, self._ramp_t / self.ramp_s) * sing * self._trip_scale
-
-        self.tau_out = np.clip(self.alpha * (K @ r_net) + f_ff, -self.tau_cap, self.tau_cap)
+        if self.shaping_on:
+            K, cond = self._shaping_matrix(q)
+            sing = np.clip((40.0 - cond) / 15.0, 0.0, 1.0)  # fade out between cond(J) 25 and 40
+            self.alpha = min(1.0, self._ramp_t / self.ramp_s) * sing * self._trip_scale
+            self.tau_out = np.clip(self.alpha * (K @ r_net) + f_ff, -self.tau_cap, self.tau_cap)
+        else:
+            self.alpha = 0.0
+            self.tau_out = np.clip(f_ff, -self.tau_cap, self.tau_cap)
         return self.tau_out
 
     def fric_curve(self, v) -> np.ndarray:
@@ -197,8 +225,39 @@ class BalancedDrag:
         w = np.exp(-np.square(np.asarray(v, float) / self.v_stribeck))
         return f_k + (f_s - f_k) * w
 
+    def toggle_mode(self, code: str) -> str:
+        """Live mode keys: 'b' = inertia shaping, 'bf' = friction comp, 'bs' = j1 sustain.
+        Returns the message to print. Re-enabling shaping restarts the 2 s ramp."""
+        if code == "b":
+            self.shaping_on = not self.shaping_on
+            if self.shaping_on:
+                self._ramp_t = 0.0
+                return f"inertia shaping ON (kappa {self.kappa:g}, ramping in over {self.ramp_s:g} s)"
+            return "inertia shaping OFF (friction comp / sustain unchanged; b to re-enable)"
+        if code == "bf":
+            if self._fs <= 0.0:
+                return "friction ff was launched at 0 (--balance-fric 0) - restart to enable it"
+            self.fric_on = not self.fric_on
+            return (f"friction compensation ON (x{self._fs:g} of the calibrated levels)"
+                    if self.fric_on else "friction compensation OFF (sustain off with it)")
+        if code == "bs":
+            if not self.fric_on or self._fs <= 0.0:
+                return "sustain rides on the friction ff, which is off - enable it first (bf)"
+            if self.sustain.any():
+                self.sustain = np.zeros(self.n, bool)
+                return "sustained relief OFF (all joints drive-gated)"
+            self.sustain = (self._sustain_cfg.copy() if self._sustain_cfg.any()
+                            else np.ones(self.n, bool))
+            js = ", ".join(f"j{i+1}" for i in np.flatnonzero(self.sustain))
+            return f"sustained relief ON ({js}; margin-capped per joint)"
+        return "unknown mode key (b = shaping, bf = friction, bs = sustain)"
+
     def summary(self) -> str:
         s = "bal r=" + " ".join(f"{x:+.2f}" for x in self.r) + f" a={self.alpha:.2f}"
+        off = [nm for nm, on in (("shape", self.shaping_on), ("fric", self.fric_on),
+                                 ("sus", bool(self.sustain.any()))) if not on]
+        if off:
+            s += " OFF:" + ",".join(off)
         if self.trips:
             s += f" trips={self.trips}"
         return s

@@ -22,7 +22,8 @@ Phases
           (tau+ + |tau-|)/2 (the gravity residual cancels). Prints paste-ready fric_static/fric_kinetic
           config lines when done. Hands off during the sweep (~10 s per joint).
 Keys while running (type + Enter): d = drag, h = hold, c = capture, f = friction sweep, s = static-friction sweep, r = release, q! = disable NOW.
-With --balance also: m <kg> = set virtual mass, i <kg.m^2> = set virtual rot. inertia, + / - = 25 % heavier / lighter.
+With --balance also: m <kg> = set virtual mass, i <kg.m^2> = set virtual rot. inertia, + / - = 25 % heavier / lighter;
+b / bf / bs = toggle inertia shaping / friction compensation / j1 sustained relief live (state printed).
 Ctrl+C: DRAG/RAMP -> HOLD, HOLD -> RELEASE, RELEASE -> disable now.
 """
 from __future__ import annotations
@@ -337,6 +338,9 @@ class GravityDragController:
                         self._say("EMERGENCY: disabling all motors NOW (arm may fall)")
                         arm.disable_all()
                         self.phase = Phase.DONE
+                    elif self.assist is not None and hasattr(self.assist, "toggle_mode") \
+                            and c in ("b", "bf", "bs"):
+                        self._say(">>> " + self.assist.toggle_mode(c))
                     elif self.assist is not None and hasattr(self.assist, "set_target") \
                             and (c in ("+", "-") or c[:1] in ("m", "i")):
                         try:

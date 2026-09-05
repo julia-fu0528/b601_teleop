@@ -60,71 +60,49 @@ one; 2 is the stability ceiling of the ~90 Hz loop.
 
 ### Modes
 
-The three behaviours are independent toggles — `--balance KAPPA` (inertia shaping, 0 = off),
-`--balance-fric` (friction compensation, default 0.85, 0/off = none), `--balance-sustain`
-(sustained relief on joint1, default on). Every combination is a usable mode; the startup
-banner names which one you are in.
+Three independent toggles — `--balance KAPPA` (inertia shaping, 0 = off), `--balance-fric`
+(friction comp, 0.85 default, 0 = off), `--balance-sustain` (j1 sustained relief, on by
+default). The startup banner names the active mode.
 
-| mode | run | what it does / when to use it |
+| mode | run | meaning |
 |---|---|---|
-| **Plain gravity drag** | `drag` | Baseline: gravity feed-forward + config `fric_comp` only. No observer, no shaping. The reference to compare everything against. |
-| **Observer only** | `drag --observe` | Zero output — identical feel to plain drag, but the momentum observer runs and `r` (estimated hand torque per joint) shows on the status line / `--log` CSV. The safe first run after any model or calibration change: at rest `r` must sit near zero; push a joint and `r` must follow your hand. |
-| **Full balanced drag** | `drag --balance 1` (or `2`) | Everything on: inertia rebalanced toward the 1.8 kg / 0.06 kg·m² virtual body (assist where heavier, resist where lighter), 85 % load-tracking friction compensation, sustained relief on joint1. The normal working mode; `2` is the lightest allowed. |
-| **Friction comp only** | `drag --balance 0` | No inertia shaping — the arm keeps its natural (gravity-compensated) inertia, but sliding friction is 85 %-relieved (drive-gated; j1 sustained). Useful to A/B how much of the feel comes from friction vs shaping. |
-| **Shaping only** | `drag --balance 1 --balance-fric 0` | Inertia rebalancing without any friction feed-forward. Isolates the shaping: directions should feel mass-balanced but sliding drag stays at full friction. |
-| **No j1 sustain** | `drag --balance 1 --balance-sustain 0` | Full mode but joint1 falls back to the drive-only gate like every other joint: relief only while you out-push full friction. Use if close-in lateral behaviour ever feels suspect — this removes the only sustained-relief path. |
-| **Torque rebalance (legacy)** | `drag --assist 1.2` | The older wrist→shoulder transfer pipeline (`b601/assist.py`, see `torque_rebalance.md`). Separate experiment; mutually exclusive with `--balance`. |
+| plain drag | `drag` | gravity ff + config `fric_comp`; no observer |
+| observer only | `drag --observe` | zero output, `r` logged — safe first run (`r` ≈ 0 at rest, follows your hand) |
+| full balanced drag | `drag --balance 1` (or `2`) | shaping + 85 % friction + j1 sustain — the working mode |
+| friction comp only | `drag --balance 0` | natural inertia, relieved friction |
+| shaping only | `drag --balance 1 --balance-fric 0` | rebalanced inertia, full friction |
+| no sustain | `drag --balance 1 --balance-sustain 0` | all joints drive-gated (relief only while out-pushing friction) |
+| torque rebalance (legacy) | `drag --assist 1.2` | old wrist→shoulder pipeline; exclusive with `--balance` |
 
-Fine-tuning on top of any mode: `--balance-md` / `--balance-irot` or the live keys (below) for
-the virtual inertia, `--balance-fo` for observer bandwidth, `--balance-resist` for how much the
-light directions may be stiffened, `--balance-fric 0.5` etc. for a gentler friction fraction.
+Live keys switch modes mid-run (state printed, shown on the status line): `b` = shaping,
+`bf` = friction comp, `bs` = j1 sustain. Tuning: `--balance-md/-irot` or live keys `m <kg>` /
+`i <kg·m²>` / `+` / `-` (virtual inertia, slewed ~0.5 s), `--balance-fo`, `--balance-resist`.
 
 ### Calibrating friction (static + kinetic)
 
-While dragging (`--balance` or plain `drag`), park the arm in a mid-range pose (the L pose) and:
-
-* type `f` + Enter — **kinetic** (sliding Coulomb) friction: slow ±0.15 rad triangle sweep under
-  stiff PD, residual split by direction of motion;
-* type `s` + Enter — **static** (breakaway) friction: joints one at a time, all others held stiff;
-  the free joint's feed-forward ramps slowly (0.25 N·m/s RS-06, 0.12 RS-00) until it moves 8 mrad,
-  in both directions. `f_static = (τ⁺+|τ⁻|)/2`, so the gravity residual cancels (and is printed as
-  a cross-check). ~10 s per joint, hands off.
-
-Friction is load-dependent (gear mesh / bearing load change with pose), so repeat both sweeps at
-4–6 well-spread poses — each run appends a row to `friction.csv` (`--fric-csv`) — then
+From DRAG, arm in a mid-range pose, hands off: `f` + Enter measures **kinetic** friction
+(±0.15 rad triangle sweep, PD residual split by direction); `s` + Enter measures **static**
+breakaway (per joint, both directions, ~10 s each; the gravity residual cancels and is printed
+as a cross-check). Repeat at 4–6 spread poses — friction is load-dependent — each run appends
+to `friction.csv`, then:
 
 ```bash
 python scripts/fit_friction.py friction.csv
 ```
 
-fits the load model `f_j(q) = f0_j + mu_j*|g_j(q)|` per joint (gear-mesh loss grows with the
-transmitted gravity torque — this is what made the per-pose sweeps spread), keeps it only where
-it beats the median, and emits paste-ready
-`fric_* = f0` / `fric_*_mu = mu` values for each `[[joint]]` in `config/b601_rs.toml`
-(the runtime then tracks the pose: compensation follows `f0 + mu*|g(q)|` instead of one all-pose median)
-(a single sweep also prints its own paste lines if one pose is all you need). With `--balance`, 85 % of the measured friction is then compensated while
-moving (`--balance-fric`, default 0.85): a Stribeck curve pays ~0.85·f_static right after breakaway,
-decaying to 0.85·f_kinetic as speed builds — gated on the estimated drive, so it cannot creep. Exception: **joint1** keeps
-its relief while clearly moving (> 0.1 rad/s), capped at (real kinetic friction − 0.20 N·m) — its
-axis is vertical and its friction constant, so nothing can self-drive, and close-in lateral drags
-(short lever to the j1 axis) stop paying full base friction. `--balance-sustain none` disables it,
-or name other joints at your own judgement.
-Breakaway itself is still paid by your hand (invisible to a motion-based estimator); what changes is
-that the joint stops feeling sticky the moment it moves. The sweeps themselves always measure the
-raw friction — every friction feed-forward is DRAG-only and off during measurement, so no need for
-`--fric 0` while calibrating. When the balance friction ff is active, the old ungated `fric_comp`
-is switched off automatically — combining both is refused (they would compensate the same friction
-twice). `--balance-fric 0` falls back to the old `fric_comp` path if you want to A/B them. Until you calibrate, module defaults are
-used (`FRIC` in `b601/balance.py`, static = kinetic).
+fits `f_j(q) = f0_j + mu_j·|g_j(q)|` per joint (median where the fit isn't better) and prints
+paste-ready `fric_*` / `fric_*_mu` lines for `config/b601_rs.toml`.
 
-While dragging, retune by feel without restarting: type `m 2.0` + Enter (virtual mass, kg),
-`i 0.08` (rotational, kg.m^2), or `+` / `-` (25 % heavier / lighter); the change slews in over
-~0.5 s. Startup knobs: `--balance-md/-irot` (target mass/inertia), `--balance-fo` (observer Hz, default 3),
-`--balance-resist` (how much heavier the light directions may be made). Guards on top of the
-usual ones: eigen-clipped gains, 2 s output ramp, singularity fade, per-joint caps
-(0.4 x tau_max), and a runaway detector (kinetic energy rising with no estimated hand power)
-that halves the gain per trip. The URDF has no rotor inertia yet — that under-estimate is the
-safe direction, but identify it before trusting kappa 2. Offline tests: `tests/test_balance.py`.
+At runtime `--balance-fric` compensates 85 % of that level while a joint moves (Stribeck:
+static level at onset → kinetic at speed), gated on the estimated drive so it cannot creep;
+every joint keeps its relief while clearly moving (> 0.1 rad/s), capped at (real level − margin)
+with per-joint margins sized above the measured model residuals — so steady sliding is relieved
+without over-pushing, yet an un-driven joint always decelerates.
+Breakaway itself stays yours (invisible to a motion-based estimator). Notes: the sweeps always
+measure raw friction (all friction ffs are DRAG-only, off during measurement); `fric_comp` is
+auto-disabled under `--balance` (double compensation is refused); module defaults apply until
+you calibrate. Guards in every mode: eigen-clipped gains, 2 s ramp, singularity fade, per-joint
+caps, runaway detector. Offline tests: `tests/test_balance.py`.
 
 ## Calibrating the gravity scales on your unit
 

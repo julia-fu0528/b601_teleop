@@ -359,6 +359,94 @@ def test_sustained_relief_j1_only():
     assert scenario(1, 0.35) < 0.08, "j2 is drive-gated only and must stall under a below-friction push"
 
 
+def test_sustained_relief_all_joints():
+    """Default CLI mask: every joint keeps margin-capped relief while sliding. j2 (margin
+    0.28, friction 0.5 in sim -> sustained relief 0.22): a below-friction push above the
+    margin sustains it; a margin-sized push must NOT (residuals cannot self-drive)."""
+    q0 = np.array([0.0, 0.9, 1.1, -0.4, 0.0, 0.0])
+    inertia = urdf_inertia(q0)
+    t0 = T_DRAG + 2.5
+
+    def scenario(weak):
+        def ext(t, q):
+            out = np.zeros(6)
+            if t0 < t < t0 + 0.5:
+                out[1] = 1.2
+            elif t0 + 0.5 <= t < t0 + 2.7:
+                out[1] = weak
+            return out
+        ext.state = {"Fs": np.zeros(3)}
+        # explicit margin: this test checks the mechanism, not the tuned per-joint defaults
+        probe = _Probe(_SimModel(DYN, inertia), ext, kappa=0.0, fric_scale=0.85,
+                       fric=COULOMB, f_static=COULOMB, sustain_joints=np.ones(6, bool),
+                       sustain_margin=0.28)
+        run(q0, assist=probe, external=ext, inertia=inertia, duration=5.5, ctrl_fric=0.0)
+        vj = np.array([v[1] for *_, v, _ in probe.hist])
+        return float(abs(vj[int((t0 + 2.1) * CFG.loop.rate_hz)]))   # past the ~0.7 s decay constant
+
+    assert scenario(0.42) > 0.12, "j2 must keep sliding under a below-friction push above its margin"
+    assert scenario(0.18) < 0.08, "a margin-sized push must NOT sustain j2"
+
+
+def test_signed_margin_direction():
+    """The margin is signed: with defaults, j2's reserve is 0.35 along -q2 (its cable's push
+    direction) and 0.20 along +q2, so the same below-friction push sustains motion one way
+    and not the other (sim friction 0.5: relief 0.30 for +q2, 0.15 for -q2)."""
+    q0 = np.array([0.0, 0.9, 1.1, -0.4, 0.0, 0.0])
+    inertia = urdf_inertia(q0)
+    t0 = T_DRAG + 2.5
+
+    def scenario(sign):
+        def ext(t, q):
+            out = np.zeros(6)
+            if t0 < t < t0 + 0.5:
+                out[1] = sign * 1.2
+            elif t0 + 0.5 <= t < t0 + 2.7:
+                out[1] = sign * 0.30
+            return out
+        ext.state = {"Fs": np.zeros(3)}
+        # explicit asymmetric margins so the test probes the mechanism, not the tuned defaults
+        probe = _Probe(_SimModel(DYN, inertia), ext, kappa=0.0, fric_scale=0.85,
+                       fric=COULOMB, f_static=COULOMB, sustain_joints=np.ones(6, bool))
+        probe.margin_pos = np.full(6, 0.20); probe.margin_neg = np.full(6, 0.35)
+        run(q0, assist=probe, external=ext, inertia=inertia, duration=5.5, ctrl_fric=0.0)
+        vj = np.array([v[1] for *_, v, _ in probe.hist])
+        return float(abs(vj[int((t0 + 2.1) * CFG.loop.rate_hz)]))
+
+    assert scenario(+1) > 0.12, "+q2 (small margin side) must sustain under a 0.30 push"
+    assert scenario(-1) < 0.08, "-q2 (residual's push direction, 0.35 margin) must stall"
+
+
+def test_live_mode_toggles():
+    """Keys b / bf / bs flip inertia shaping, friction comp, and j1 sustain live."""
+    q0 = np.array([0.0, 0.9, 1.1, -0.4, 0.0, 0.0])
+    inertia = urdf_inertia(q0)
+
+    def run_with(cmds, **kw):
+        probe = _Probe(_SimModel(DYN, inertia), kappa=1.0, fric_scale=0.85,
+                       fric=COULOMB, f_static=COULOMB, **kw)
+        dt = 1.0 / CFG.loop.rate_hz
+        arm = SimArm(DYN, q0, dt, coulomb=COULOMB, inertia=inertia)
+        ctrl = GravityDragController(arm, DYN, CFG, assist=probe, duration=2.0, auto_release=True,
+                                     interactive=False, realtime=False, print_every=0, hold_timeout=1.0)
+        for c in cmds:
+            ctrl._cmds.put(c)
+        assert ctrl.run() is Phase.DONE and ctrl.freeze_reason is None
+        return probe
+
+    sus = np.array([True] + [False] * 5)
+    p = run_with(["b", "bf"], sustain_joints=sus)
+    assert not p.shaping_on and not p.fric_on
+    assert p.alpha == 0.0 and "OFF:shape,fric" in p.summary()
+    p = run_with(["bs"], sustain_joints=sus)
+    assert not p.sustain.any() and p.shaping_on and p.fric_on
+    p = run_with(["b", "b", "bs", "bs"], sustain_joints=sus)
+    assert p.shaping_on and p.sustain.any()
+    # bs with friction off must refuse (sustain rides on the friction ff)
+    p = run_with(["bf", "bs"], sustain_joints=sus)
+    assert not p.fric_on and p.sustain.any(), "bs must refuse while friction ff is off"
+
+
 def test_kappa_validation():
     for bad in (-0.1, 2.5):
         try:
@@ -375,7 +463,8 @@ if __name__ == "__main__":
                test_wrong_inertia_stays_bounded, test_live_retarget_slews,
                test_static_sweep_measures_breakaway, test_fric_curve_stribeck,
                test_fit_friction_recovers_load_model, test_fric_curve_tracks_load,
-               test_sustained_relief_j1_only, test_kappa_validation]:
+               test_sustained_relief_j1_only, test_sustained_relief_all_joints, test_signed_margin_direction,
+               test_live_mode_toggles, test_kappa_validation]:
         print(f"-- {fn.__name__}")
         fn()
         print("   ok")

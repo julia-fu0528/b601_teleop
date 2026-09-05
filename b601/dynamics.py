@@ -15,13 +15,17 @@ class ArmDynamics:
         lock_joints: tuple[str, ...] = (),
         g_scale: np.ndarray | list[float] | None = None,
         g_bias: np.ndarray | list[float] | None = None,
+        lock_q: np.ndarray | None = None,
     ) -> None:
         full = pin.buildModelFromUrdf(str(urdf))
-        lock_ids = [full.getJointId(n) for n in lock_joints]
-        for n, jid in zip(lock_joints, lock_ids):
-            if jid == 0:
+        # getJointId returns njoints (not 0) for unknown names, and buildReducedModel then
+        # silently locks nothing - check existence explicitly
+        for n in lock_joints:
+            if not full.existJointName(n):
                 raise ValueError(f"lock joint {n!r} not in URDF")
-        self.model = pin.buildReducedModel(full, lock_ids, pin.neutral(full)) if lock_ids else full
+        lock_ids = [full.getJointId(n) for n in lock_joints]
+        q_lock = pin.neutral(full) if lock_q is None else np.asarray(lock_q, dtype=float)
+        self.model = pin.buildReducedModel(full, lock_ids, q_lock) if lock_ids else full
         self.data = self.model.createData()
 
         names = [self.model.names[i] for i in range(1, self.model.njoints)]
@@ -42,6 +46,9 @@ class ArmDynamics:
         self.effort = np.asarray(self.model.effortLimit, dtype=float)
 
         ee = "gripper_end" if self.model.existFrame("gripper_end") else "link6"
+        if not self.model.existFrame(ee):
+            raise ValueError("URDF has neither 'gripper_end' nor 'link6' frame for the EE "
+                             "(getFrameId would silently return an invalid id)")
         self._ee_fid = self.model.getFrameId(ee)
 
     def gravity_raw(self, q: np.ndarray) -> np.ndarray:
