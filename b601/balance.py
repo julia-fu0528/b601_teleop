@@ -64,7 +64,10 @@ class BalancedDrag:
                  fric_scale: float = 0.0, tau_cap: np.ndarray | None = None,
                  r0: np.ndarray | None = None, fric: np.ndarray | None = None,
                  f_static: np.ndarray | None = None, fric_mu: np.ndarray | None = None,
-                 f_static_mu: np.ndarray | None = None, v_stribeck: float = 0.15,
+                 f_static_mu: np.ndarray | None = None,
+                 f_static_pos: np.ndarray | None = None,   # direction-dependent breakaway (paper eq 28;
+                 f_static_neg: np.ndarray | None = None,   # None = symmetric f_static both ways)
+                 v_stribeck: float = 0.15,
                  sustain_joints: np.ndarray | None = None,
                  sustain_margin: np.ndarray | float | None = None, v_hold: float = 0.10,
                  v0: float = 0.08, ramp_s: float = 2.0, dls_lambda: float = 0.05,
@@ -97,6 +100,11 @@ class BalancedDrag:
         self._raw_kin = (FRIC[: self.n] if fric is None else np.asarray(fric, float)).copy()
         self._raw_static = (self._raw_kin.copy() if f_static is None
                             else np.asarray(f_static, float).copy())
+        # direction-dependent breakaway (fall back to the symmetric level both ways)
+        self._raw_static_pos = (self._raw_static.copy() if f_static_pos is None
+                                else np.asarray(f_static_pos, float).copy())
+        self._raw_static_neg = (self._raw_static.copy() if f_static_neg is None
+                                else np.asarray(f_static_neg, float).copy())
         self._raw_mu = (np.zeros(self.n) if fric_mu is None
                         else np.clip(np.asarray(fric_mu, float), 0.0, 0.2))
         self._raw_static_mu = (np.zeros(self.n) if f_static_mu is None
@@ -336,7 +344,10 @@ class BalancedDrag:
         #     static breakaway in that direction, decaying as the joint gets moving. Direction
         #     from sign(r_db) - no F/T sensor needed. Helps proximal joints break free.
         if self.fric_on and self.break_beta > 0.0:
-            f_static = np.minimum(self._raw_static + self._raw_static_mu * self._g_abs, self.level_max)
+            # direction-dependent breakaway (paper eq 28): the hand's intended direction sign(r_db)
+            # selects which threshold to pre-pay - cheap gearboxes break away asymmetrically
+            raw_dir = np.where(r_db >= 0.0, self._raw_static_pos, self._raw_static_neg)
+            f_static = np.minimum(raw_dir + self._raw_static_mu * self._g_abs, self.level_max)
             decay = np.exp(-np.abs(v) / max(self.break_vs, 1e-3))
             f_ff = f_ff + self.break_beta * self.fric_scale * f_static * np.sign(r_db) * decay * s_k
 
@@ -380,9 +391,11 @@ class BalancedDrag:
         base + mu * |g_cal(q)| (all fric_scale-scaled), so the compensation follows the
         gear load instead of a single all-pose median."""
         s = self.fric_scale
+        vv = np.asarray(v, float)
         f_k = np.minimum((self._raw_kin + self.mu_on * self._raw_mu * self._g_abs) * s, self.level_max)
-        f_s = np.minimum((self._raw_static + self._raw_static_mu * self._g_abs) * s, self.level_max)
-        w = np.exp(-np.square(np.asarray(v, float) / self.v_stribeck))
+        raw_s = np.where(vv >= 0.0, self._raw_static_pos, self._raw_static_neg)   # eq 28 by motion dir
+        f_s = np.minimum((raw_s + self._raw_static_mu * self._g_abs) * s, self.level_max)
+        w = np.exp(-np.square(vv / self.v_stribeck))
         return f_k + (f_s - f_k) * w
 
     def toggle_mode(self, code: str) -> str:

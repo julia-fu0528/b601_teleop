@@ -255,14 +255,21 @@ def test_static_sweep_measures_breakaway():
     err = meas - static_true
     assert np.all(err > -0.03), f"static friction under-measured: {np.round(err, 3)}"
     assert np.all(err < 0.15), f"static friction over-measured (ramp too fast?): {np.round(err, 3)}"
-    # the sweep must land in the friction CSV for multi-pose aggregation
+    # per-direction values (paper eq 28) recorded alongside the symmetric average
+    sp, sn = ctrl.static_pos, ctrl.static_neg
+    assert np.isfinite(sp).all() and np.isfinite(sn).all(), f"pos/neg incomplete: {sp} {sn}"
+    assert np.allclose(0.5 * (sp + sn), meas, atol=1e-9), "average must equal (tau+ + tau-)/2"
+    # the sweep must land in the friction CSV for multi-pose aggregation: 3 rows (avg, pos, neg)
     import csv as _csv
     with open(fcsv, newline="") as fh:
         rows = list(_csv.DictReader(fh))
     fcsv.unlink()
-    assert len(rows) == 1 and rows[0]["kind"] == "static"
-    logged = np.array([float(rows[0][f"f{i+1}"]) for i in range(6)])
+    by_kind = {r["kind"]: r for r in rows}
+    assert set(by_kind) == {"static", "static_pos", "static_neg"}, f"kinds: {sorted(by_kind)}"
+    logged = np.array([float(by_kind["static"][f"f{i+1}"]) for i in range(6)])
     assert np.allclose(logged, meas, atol=1e-3)
+    logged_p = np.array([float(by_kind["static_pos"][f"f{i+1}"]) for i in range(6)])
+    assert np.allclose(logged_p, sp, atol=1e-3)
 
 
 def test_fric_curve_stribeck():
@@ -515,6 +522,18 @@ def test_paper_features():
     no_v = bt.update(Q_WRIST.copy(), v1, 0.011)
     assert np.allclose(with_v - no_v, 0.1 * 0.5, atol=1e-9), "visc off must remove exactly B*qd"
     assert bt.set_fric_terms(mu=True, viscous=True) == (True, True)
+
+    # (8) direction-dependent breakaway (paper eq 28): fric_curve near rest and the breakaway
+    # assist must select tau+ or tau- by direction, and fall back to symmetric when not given
+    ba = BalancedDrag(DYN, kappa=0.0, fric=np.full(6, 0.3), f_static=np.full(6, 0.4),
+                      f_static_pos=np.full(6, 0.6), f_static_neg=np.full(6, 0.2),
+                      fric_scale=1.0, sustain_joints=np.zeros(6, bool))
+    ba._g_abs = np.zeros(6)
+    fp = ba.fric_curve(np.full(6, +1e-4))            # ~rest, moving + -> static_pos level
+    fn = ba.fric_curve(np.full(6, -1e-4))
+    assert np.allclose(fp, 0.6, atol=0.01) and np.allclose(fn, 0.2, atol=0.01), (fp, fn)
+    sym = BalancedDrag(DYN, kappa=0.0, fric=np.full(6, 0.3), f_static=np.full(6, 0.4))
+    assert np.allclose(sym._raw_static_pos, 0.4) and np.allclose(sym._raw_static_neg, 0.4)
 
     # defaults: no feature changes the output vs a plain build
     base=BalancedDrag(DYN,kappa=1.0,fric_scale=0.85,fric=COULOMB,f_static=COULOMB,sustain_joints=np.ones(6,bool))

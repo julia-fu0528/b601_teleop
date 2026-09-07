@@ -17,10 +17,12 @@ Phases
 
   FRICTION (key f, from DRAG) like CAPTURE but a larger, slower sweep (+/- 0.15 rad at ~0.15 rad/s) whose
           PD residual is split by direction of motion: kinetic Coulomb friction = (resid+ - resid-)/2 per joint.
-  STATIC  (key s, from DRAG) breakaway-friction sweep: joints one at a time, all others held stiff; the free
-          joint's torque ramps slowly until it moves 8 mrad, in both directions. Static friction =
-          (tau+ + |tau-|)/2 (the gravity residual cancels). Prints paste-ready fric_static/fric_kinetic
-          config lines when done. Hands off during the sweep (~10 s per joint).
+  STATIC  (key s, from DRAG) breakaway-friction sweep (paper 4.3): joints one at a time, all others held
+          stiff; the free joint's torque ramps slowly until |qd| stays above 0.03 rad/s for ~60 ms (the
+          sustained window rejects backlash take-up), in both directions. Records the torque at the window
+          ONSET (t+). Keeps tau+ and tau- separately (eq 28: direction-dependent breakaway) AND the
+          symmetric average (gravity residual cancels). Prints paste-ready fric_static/-_pos/-_neg lines.
+          Hands off during the sweep (~10 s per joint).
   VFRIC   (key fv, from DRAG) multi-speed CURRENT-BASED sweep: constant-velocity triangles at several speeds,
           reading the motor torque feedback (torq = K_t*iq, eq 22) minus gravity = friction(+/-v). Rows go to
           friction_v.csv; scripts/fit_friction.py regresses tau_c*tanh(v/eps) + B*v + c0 -> viscous B and a
@@ -214,6 +216,8 @@ class GravityDragController:
         self._st_dir = 1
         self._st_tau = 0.0
         self._st_anchor = 0.0
+        self._st_vcnt = 0          # consecutive cycles with |qd| above the breakaway threshold
+        self._st_tau_onset = 0.0   # ramp torque at the onset of the sustained-velocity window (t+)
         self._st_hold = q.copy()
         self._st_t = t
         self._st_res: dict[int, dict[int, float]] = {}
@@ -225,27 +229,35 @@ class GravityDragController:
 
     def _static_finish(self, names) -> None:
         self.static_result = np.full(self.n, np.nan)
+        self.static_pos = np.full(self.n, np.nan)    # breakaway toward +q (paper eq 26)
+        self.static_neg = np.full(self.n, np.nan)    # breakaway toward -q (paper eq 27)
         resid = np.full(self.n, np.nan)
         kin = np.array([j.fric_kinetic for j in self.cfg.joints], float)
         if getattr(self, "friction_result", None) is not None:
             kin = np.where(np.isfinite(self.friction_result), self.friction_result, kin)
-        lines = ["static-friction sweep done (breakaway torque per joint):",
+        lines = ["static-friction sweep done (breakaway torque per joint, per direction):",
                  "  joint    tau+     tau-     f_static  g-resid   kinetic('f'/config)"]
         for i in self._st_joints:
             tp = self._st_res.get(i, {}).get(1, float("nan"))
             tm = self._st_res.get(i, {}).get(-1, float("nan"))
+            self.static_pos[i], self.static_neg[i] = tp, tm
             self.static_result[i] = 0.5 * (tp + tm)
             resid[i] = 0.5 * (tm - tp)
             lines.append(f"  {names[i]:8s} {tp:+.3f}   {-tm:+.3f}   {self.static_result[i]:8.3f} "
                          f"{resid[i]:+8.3f}   {kin[i] if kin[i] > 0 else float('nan'):8.3f}")
         lines.append("paste into config/b601_rs.toml under each [[joint]] (raw values; the 85 % factor")
-        lines.append("is applied at runtime by --balance-fric):")
+        lines.append("is applied at runtime by --balance-fric). NOTE: the per-direction values each")
+        lines.append("carry the gravity residual at this pose; the symmetric average cancels it.")
         for i in self._st_joints:
             kin_s = f"  fric_kinetic = {kin[i]:.2f}" if kin[i] > 0 else "  # fric_kinetic: run the 'f' sweep"
-            lines.append(f"  {names[i]:8s}: fric_static = {self.static_result[i]:.2f}{kin_s}")
+            lines.append(f"  {names[i]:8s}: fric_static = {self.static_result[i]:.2f}"
+                         f"  fric_static_pos = {self.static_pos[i]:.2f}"
+                         f"  fric_static_neg = {self.static_neg[i]:.2f}{kin_s}")
         lines.append("sanity: f_static >= kinetic; a large |g-resid| means the gravity model is off at this pose")
         self._say("\n".join(lines))
         self._append_fric("static", self._st_hold, self.static_result, resid)
+        self._append_fric("static_pos", self._st_hold, self.static_pos, resid)
+        self._append_fric("static_neg", self._st_hold, self.static_neg, resid)
 
     # ---- main ----------------------------------------------------------------------------
     def run(self) -> Phase:
@@ -674,15 +686,27 @@ class GravityDragController:
                         kd[j] = self.kd_drag[j]           # light damping bounds the post-breakaway motion
                         self._st_tau += self._st_dir * self._st_rate[j] * dt
                         tau_cmd[j] += self._st_tau
-                        if abs(q[j] - self._st_anchor) > 0.008:
-                            self._st_res.setdefault(j, {})[self._st_dir] = abs(self._st_tau)
+                        # breakaway = |qd| above threshold for a SUSTAINED window (paper 4.3, t+): a
+                        # plain position threshold fires on backlash take-up (the joint clicks through
+                        # the gear slack) and under-reads. The recorded torque is the one at the ONSET
+                        # of the sustained window, not when the window completes.
+                        if abs(v[j]) > 0.03:
+                            if self._st_vcnt == 0:
+                                self._st_tau_onset = abs(self._st_tau)
+                            self._st_vcnt += 1
+                        else:
+                            self._st_vcnt = 0
+                        if self._st_vcnt >= 6:            # ~60 ms sustained at 100 Hz
+                            self._st_res.setdefault(j, {})[self._st_dir] = self._st_tau_onset
                             self._st_hold[j] = q[j]
+                            self._st_vcnt = 0
                             self._st_stage, self._st_t = "rehold", t
                         elif abs(self._st_tau) > self._st_cap[j]:
                             self._st_res.setdefault(j, {})[self._st_dir] = float("nan")
                             self._say(f"  {names[j]}: no breakaway at {self._st_cap[j]:.2f} N.m "
                                       f"(dir {self._st_dir:+d}) — near a limit or in contact?")
                             self._st_hold[j] = q[j]
+                            self._st_vcnt = 0
                             self._st_stage, self._st_t = "rehold", t
                     elif self._st_stage == "rehold":
                         if el >= 0.8:

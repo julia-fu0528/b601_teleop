@@ -248,9 +248,10 @@ def main() -> None:
     if not out:
         raise SystemExit(f"{args.csv}: no sweeps recorded (run the 'f' and 's' keys while dragging)")
 
-    for kind in ("kinetic", "static"):
+    for kind in ("kinetic", "static", "static_pos", "static_neg"):
         if kind not in out:
-            print(f"[{kind}] no sweeps yet (key '{'f' if kind == 'kinetic' else 's'}')")
+            if kind in ("kinetic", "static"):        # pos/neg only exist on newer sweeps - stay quiet
+                print(f"[{kind}] no sweeps yet (key '{'f' if kind == 'kinetic' else 's'}')")
             continue
         r = out[kind]
         print(f"[{kind}] {r['n']} pose(s)")
@@ -266,14 +267,14 @@ def main() -> None:
                       f"{r['gspan'][j]:7.2f}   {r['rms_med'][j]:7.3f}       --    ({why})")
 
     print("\npaste into config/b601_rs.toml under each [[joint]] (raw values; --balance-fric applies the 85 %):")
-    kinds = [k for k in ("static", "kinetic") if k in out]
+    kinds = [k for k in ("static", "static_pos", "static_neg", "kinetic") if k in out]
     for j in range(len(next(iter(out.values()))["median"])):
         parts = []
         for kind in kinds:
             r = out[kind]
             if np.isfinite(r["f0"][j]):
                 parts.append(f"fric_{kind} = {r['f0'][j]:.2f}")
-                if r["mu"][j] > 0:
+                if r["mu"][j] > 0 and kind in ("static", "kinetic"):   # no per-direction mu fields
                     parts.append(f"fric_{kind}_mu = {r['mu'][j]:.3f}")
         print(f"  joint{j+1}:  " + "   ".join(parts))
     if "static" in out and "kinetic" in out:

@@ -99,6 +99,11 @@ def cmd_drag(cfg, dyn, args) -> None:
                           for i, j in enumerate(cfg.joints)])
         f_sta = np.array([j.fric_static if j.fric_static > 0 else f_kin[i]
                           for i, j in enumerate(cfg.joints)])
+        # direction-dependent breakaway ('s' sweep, paper eq 28); falls back to the symmetric level
+        f_sp = np.array([j.fric_static_pos if j.fric_static_pos > 0 else f_sta[i]
+                         for i, j in enumerate(cfg.joints)])
+        f_sn = np.array([j.fric_static_neg if j.fric_static_neg > 0 else f_sta[i]
+                         for i, j in enumerate(cfg.joints)])
         mu_kin = np.array([j.fric_kinetic_mu for j in cfg.joints])
         # static falls back to the kinetic slope when only the kinetic model was fitted
         mu_sta = np.array([j.fric_static_mu if j.fric_static > 0 else mu_kin[i]
@@ -129,6 +134,7 @@ def cmd_drag(cfg, dyn, args) -> None:
             dyn, kappa=args.balance, m_d=args.balance_md, i_rot=args.balance_irot,
             f_o=args.balance_fo, resist=args.balance_resist,
             fric_scale=fscale, fric=f_kin, f_static=f_sta,
+            f_static_pos=f_sp, f_static_neg=f_sn,
             fric_mu=mu_kin, f_static_mu=mu_sta,
             sustain_joints=sustain_mask,
             fric_viscous=np.array([j.fric_viscous for j in cfg.joints]),
