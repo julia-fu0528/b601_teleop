@@ -17,6 +17,16 @@ varies (j1's axis is vertical) naturally keep the median.
 prints per joint: n, min/median/max, the fitted f0 / mu with rms before vs after, and a
 paste-ready config block (fric_kinetic/-_static = f0, fric_kinetic_mu/-_static_mu = mu).
 --balance-fric applies the 85 % at runtime; raw values go in the config.
+
+MULTI-SPEED (current-based) mode: if the CSV has a 'v' column (from the 'fv' sweep, which reads the
+motor torque feedback torq = K_t*iq and subtracts gravity, eq 22), this instead fits
+
+    tau_f(v) = tau_c * tanh(v/eps) + B * v            (eq 25)
+
+per joint by pairing +/-v at each pose (the even offset cancels, eq 23-24, so tau_c is de-biased) and
+robust (Huber) regression. Prints tau_c and viscous B -> fric_kinetic / fric_viscous.
+
+    python scripts/fit_friction.py friction_v.csv
 """
 from __future__ import annotations
 
@@ -44,6 +54,143 @@ def load_rows(path):
             f = np.array([float(row[f"f{i+1}"]) for i in range(n)])
             rows[row["kind"]].append((q, f))
     return rows, n
+
+
+# ---- velocity-friction (multi-speed, current-based) fit: tau_c + B --------------------------
+
+def has_velocity_column(path) -> bool:
+    with open(path, newline="") as fh:
+        hdr = csv.reader(fh).__next__()
+    return "vset" in hdr and "kind" not in hdr
+
+
+def load_v_rows(path):
+    """Rows from the 'fv' sweep: (vset_signed, q[n], mv[n], f[n]) where mv = measured per-joint
+    velocity and f = torq - g (current-based). vset is only a pairing label."""
+    out = []
+    with open(path, newline="") as fh:
+        rd = csv.DictReader(fh)
+        n = sum(1 for k in rd.fieldnames if k.startswith("f") and k[1:].isdigit())
+        for row in rd:
+            vset = float(row["vset"])
+            q = np.array([float(row[f"q{i+1}"]) for i in range(n)])
+            mv = np.array([float(row[f"mv{i+1}"]) for i in range(n)])
+            f = np.array([float(row[f"f{i+1}"]) for i in range(n)])
+            out.append((vset, q, mv, f))
+    return out, n
+
+
+def _pair_odd(rows, n):
+    """Pair each +vset row with the -vset row at the SAME pose and speed setting. Per joint take the
+    odd part of the friction, 0.5*(f(+) - f(-)) -- which cancels the even offset per pose (gravity
+    residual / current bias), the paper's +/-v subtraction (eq 23-24), so tau_c comes out de-biased --
+    against the MEASURED speed 0.5*(mv(+) - mv(-)) (immune to tracking lag).
+    Returns v_eff[k, n] (>0 per joint), ODD[k, n], and the pose q[k, n] of each pair."""
+    plus, minus = {}, {}
+    for vset, q, mv, f in rows:
+        key = (tuple(np.round(q, 4)), round(abs(vset), 5))
+        (plus if vset > 0 else minus)[key] = (mv, f)
+    veff, odd, qpose = [], [], []
+    for key in sorted(set(plus) & set(minus), key=lambda k: k[1]):
+        mvp, fp = plus[key]
+        mvn, fn = minus[key]
+        veff.append(0.5 * (mvp - mvn))       # per-joint measured speed magnitude
+        odd.append(0.5 * (fp - fn))          # per-joint de-biased friction
+        qpose.append(np.array(key[0]))
+    z = np.zeros((0, n))
+    return ((np.array(veff) if veff else z), (np.array(odd) if odd else z),
+            (np.array(qpose) if qpose else z))
+
+
+def _robust_fit(A, y):
+    """Robust (Huber IRLS) linear fit y ~ A @ coef. Returns (coef, rms)."""
+    w = np.ones(len(y))
+    coef = np.zeros(A.shape[1])
+    for _ in range(12):
+        W = np.sqrt(w)
+        coef, *_ = np.linalg.lstsq(A * W[:, None], y * W, rcond=None)
+        res = y - A @ coef
+        s = 1.4826 * np.median(np.abs(res - np.median(res))) + 1e-9   # robust sigma (MAD)
+        delta = 1.345 * s
+        a = np.abs(res)
+        w = np.where(a <= delta, 1.0, delta / np.maximum(a, 1e-9))
+    rms = float(np.sqrt(np.mean((y - A @ coef) ** 2)))
+    return coef, rms
+
+
+def fit_v(csv_path, eps=0.02, config_path=None):
+    """Per joint, from the multi-speed sweep: the COMBINED kinetic model
+
+        odd(v, q) ~ (tau_c + mu * |g_j(q)|) * tanh(v/eps) + B * v
+
+    i.e. de-biased Coulomb tau_c, load slope mu (needs poses spanning >= 1 N.m of |g_j|),
+    and viscous B. mu is kept only when the load model clearly beats the flat one
+    (>= 6 pairs, span >= 1, mu > 0, rms < 0.9x flat); otherwise mu = 0 (flat + B).
+    Returns {'n_pairs','tau_c','mu','B','rms','rms_flat','vspan','gspan','mu_kept','eps'}."""
+    cfg = load_config(config_path or ROOT / "config" / "b601_rs.toml")
+    dyn = ArmDynamics(cfg.urdf, cfg.joint_names, cfg.lock_joints,
+                      [j.g_scale for j in cfg.joints], [j.g_bias for j in cfg.joints])
+    rows, n = load_v_rows(csv_path)
+    VEFF, ODD, QP = _pair_odd(rows, n)
+    res = {"n_pairs": len(VEFF), "tau_c": np.full(n, np.nan), "mu": np.zeros(n), "B": np.zeros(n),
+           "rms": np.full(n, np.nan), "rms_flat": np.full(n, np.nan), "vspan": np.full(n, np.nan),
+           "gspan": np.full(n, np.nan), "mu_kept": np.zeros(n, bool), "eps": float(eps)}
+    if len(VEFF) == 0:
+        return res
+    GA = np.array([np.abs(dyn.gravity(q)) for q in QP])              # |g_j| at each pair's pose
+    for j in range(n):
+        vj, yj, gj = VEFF[:, j], ODD[:, j], GA[:, j]
+        ok = np.isfinite(yj) & np.isfinite(vj) & (vj > 1e-3)
+        if ok.sum() < 3:
+            continue
+        vj, yj, gj = vj[ok], yj[ok], gj[ok]
+        res["vspan"][j] = float(vj.max() - vj.min())
+        res["gspan"][j] = float(gj.max() - gj.min())
+        t = np.tanh(vj / eps)
+        (tc2, B2), rms2 = _robust_fit(np.c_[t, vj], yj)              # flat: tau_c + B*v
+        res["tau_c"][j], res["B"][j], res["rms"][j] = float(tc2), max(float(B2), 0.0), rms2
+        res["rms_flat"][j] = rms2
+        if ok.sum() >= 6 and res["gspan"][j] >= 1.0:                 # + load slope mu*|g|
+            (tc3, mu3, B3), rms3 = _robust_fit(np.c_[t, gj * t, vj], yj)
+            if mu3 > 0.0 and tc3 >= 0.0 and rms3 < 0.9 * rms2:
+                res["tau_c"][j], res["mu"][j] = float(tc3), float(mu3)
+                res["B"][j], res["rms"][j] = max(float(B3), 0.0), rms3
+                res["mu_kept"][j] = True
+    return res
+
+
+def print_v(res, n):
+    print(f"[velocity-friction] {res['n_pairs']} +/-v pair(s), tanh eps = {res['eps']:.3f} rad/s "
+          f"- combined model tau_c + mu*|g(q)| + B*qd")
+    print("  joint    tau_c    mu       B(visc)  |g|span  rms     rms(flat)  note")
+    for j in range(n):
+        tc, mu, B = res["tau_c"][j], res["mu"][j], res["B"][j]
+        if not np.isfinite(tc):
+            print(f"  joint{j+1}     --       --       --        --       --       --       too few speeds")
+            continue
+        if res["mu_kept"][j]:
+            note = "load model kept"
+        elif np.isfinite(res["gspan"][j]) and res["gspan"][j] < 1.0:
+            note = "mu unfittable (|g| span < 1 - sweep more spread poses)"
+        else:
+            note = "flat model good enough"
+        if B <= 1e-3:
+            note += "; B~0"
+        print(f"  joint{j+1}   {tc:6.3f}   {mu:6.3f}   {B:7.4f}   {res['gspan'][j]:6.2f}   "
+              f"{res['rms'][j]:6.3f}   {res['rms_flat'][j]:6.3f}    {note}")
+    print("\npaste into config/b601_rs.toml under each [[joint]] (raw values; --balance-fric applies the 85 %):")
+    for j in range(n):
+        tc, mu, B = res["tau_c"][j], res["mu"][j], res["B"][j]
+        if not np.isfinite(tc):
+            continue
+        line = f"  joint{j+1}:  fric_kinetic = {tc:.2f}"
+        if res["mu_kept"][j]:
+            line += f"   fric_kinetic_mu = {mu:.3f}"
+        if B > 1e-3:
+            line += f"   fric_viscous = {B:.4f}"
+        print(line)
+    print("  (tau_c is the de-biased Coulomb intercept; mu grows it with transmitted load |g_j(q)|; "
+          "B is per-joint viscous. More spread poses -> tighter mu.)")
 
 
 def fit(csv_path, config_path=None):
@@ -86,7 +233,16 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("csv", nargs="?", default="friction.csv")
     ap.add_argument("--config", default=None)
+    ap.add_argument("--eps", type=float, default=0.02, help="tanh knee (rad/s) for the velocity-friction fit")
     args = ap.parse_args()
+
+    # multi-speed current-based sweep (has a 'v' column) -> tau_c + viscous B
+    if Path(args.csv).exists() and has_velocity_column(args.csv):
+        rows, n = load_v_rows(args.csv)
+        if not rows:
+            raise SystemExit(f"{args.csv}: no velocity-friction rows (run the 'fv' sweep while dragging)")
+        print_v(fit_v(args.csv, eps=args.eps, config_path=args.config), n)
+        return
 
     out = fit(args.csv, args.config)
     if not out:

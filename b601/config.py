@@ -21,6 +21,7 @@ class JointCfg:
     fric_kinetic: float = 0.0  # sliding Coulomb friction at zero load, N.m ('f' sweep; 0 = not calibrated)
     fric_static_mu: float = 0.0   # load slope: friction grows by mu * |g_j(q)| (fit_friction.py; 0 = constant)
     fric_kinetic_mu: float = 0.0
+    fric_viscous: float = 0.0     # viscous B in tau_f = tau_c*tanh + B*qd, N.m.s/rad (0 = none)
     hold_kp: float = 10.0
     hold_kd: float = 0.5
 

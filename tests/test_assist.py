@@ -70,6 +70,9 @@ def run_drag(q0, *, external=None, assist=None, duration=3.0, coulomb=COULOMB):
     arm = SimArm(DYN, np.array(q0, float), dt, coulomb=np.asarray(coulomb, float), external=external)
     ctrl = GravityDragController(arm, DYN, CFG, assist=assist, duration=duration, auto_release=True,
                                  interactive=False, realtime=False, print_every=0, hold_timeout=1.0)
+    # Pin the friction feed-forward like the sim's COULOMB is pinned: these tests exercise the
+    # drag/assist mechanisms, and must not shift when the hardware calibration in the config does.
+    ctrl.fric_comp = np.array([0.35, 0.35, 0.35, 0.0, 0.0, 0.0])
     phase = ctrl.run()
     assert phase is Phase.DONE and ctrl.freeze_reason is None, \
         f"phase={phase} freeze={ctrl.freeze_reason}"

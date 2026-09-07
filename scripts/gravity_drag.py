@@ -131,7 +131,31 @@ def cmd_drag(cfg, dyn, args) -> None:
             fric_scale=fscale, fric=f_kin, f_static=f_sta,
             fric_mu=mu_kin, f_static_mu=mu_sta,
             sustain_joints=sustain_mask,
+            fric_viscous=np.array([j.fric_viscous for j in cfg.joints]),
+            damp_t=args.balance_damp[0], damp_r=args.balance_damp[1],
+            break_beta=args.balance_breakaway,
+            alpha_sigma_v=args.balance_alpha_vel, alpha_kappa0=args.balance_alpha_sing,
+            detent_kp=args.balance_detent,
             tau_cap=0.4 * np.array([j.tau_max for j in cfg.joints]))
+        # two calibrated KINETIC friction models for live A/B ('fmodel <name>' or the web toggle);
+        # statics (breakaway) are shared. "viscous" = whatever the config holds (fv COMBINED fit
+        # 2026-09-07: de-biased tau_c + mu*|g(q)| + B*qd). "load" = the previous friction_v2 fit
+        # 2026-09-05 (PD-effort): higher tau_c + mu*|g(q)| on j2, no viscous.
+        assist.fric_models = {
+            "viscous": {"kin": f_kin.tolist(), "mu": mu_kin.tolist(),
+                        "viscous": [j.fric_viscous for j in cfg.joints]},
+            # "flat": the SAME fv sweep refitted WITHOUT the load term (2026-09-07 am) - the pooled
+            # tau_c absorbs average load (j2 0.27 vs combined 0.18+mu). Refit-style ablation baseline:
+            # NOT reproducible by toggling mu off (that keeps the combined fit's lower intercept).
+            "flat": {"kin": [0.43, 0.27, 0.36, 0.14, 0.22, 0.16],
+                     "mu": [0.0] * len(cfg.joints),
+                     "viscous": [0.1086, 0.0, 0.0, 0.0723, 0.0, 0.1121]},
+            "load": {"kin": [0.52, 0.48, 0.68, 0.28, 0.24, 0.25],
+                     "mu": [0.0, 0.018, 0.0, 0.0, 0.0, 0.0],
+                     "viscous": [0.0] * len(cfg.joints)},
+        }
+        assist.set_fric_model(args.balance_fric_model)
+        assist.set_fric_terms(mu=args.balance_mu == "on", viscous=args.balance_viscous == "on")
         if fscale > 0.0:
             if args.fric is None:
                 args.fric = 0.0
@@ -176,13 +200,29 @@ def cmd_drag(cfg, dyn, args) -> None:
         gripper_hold=(args.gripper == "hold"),
         duration=args.duration, auto_release=args.auto_release,
         log_path=args.log, calib_path=args.calib, fric_path=args.fric_csv,
-        capture_s=args.capture_s, capture_amp=args.capture_amp, print_every=args.print_every,
+        capture_s=args.capture_s, capture_amp=args.capture_amp,
+        vfric_path=args.vfric_csv, vfric_speeds=args.vfric_speeds,
+        vfric_period=args.vfric_period, vfric_amp_max=args.vfric_amp_max,
+        vfric_periods=args.vfric_periods,
+        print_every=args.print_every,
         interactive=not args.no_keys, realtime=not (args.sim and args.fast),
         hold_timeout=args.hold_timeout,
     )
+    srv = None
+    if args.serve is not None:
+        if not hasattr(assist, "set_kappa"):
+            raise SystemExit("--serve needs --balance (the web panel controls the balance layer)")
+        from b601 import webserve
+        html = Path(args.serve_html) if args.serve_html else ROOT / "balance_panel.html"
+        srv = webserve.start(ctrl, html, port=args.serve)
+        print(f"web control panel: http://127.0.0.1:{args.serve}  (open it; moving a slider prints + "
+              f"applies here live). Serving {html.name}.")
+
     try:
         phase = ctrl.run()
     finally:
+        if srv is not None:
+            srv.shutdown()
         arm.close()
     print("final phase:", phase.value, "| freeze reason:", ctrl.freeze_reason)
 
@@ -215,6 +255,17 @@ def main() -> None:
                         "pose; aggregate with scripts/fit_friction.py")
     d.add_argument("--capture-s", type=float, default=5.0, help="capture duration: 1 s settle + whole 2 s sweep periods")
     d.add_argument("--capture-amp", type=float, default=0.05, help="sweep amplitude per joint during capture (rad)")
+    d.add_argument("--vfric-csv", default="friction_v.csv",
+                   help="CSV the 'fv' velocity-friction sweep appends to (v, q, torq-g per joint); "
+                        "fit B + de-biased tau_c with scripts/fit_friction.py")
+    d.add_argument("--vfric-speeds", type=lambda s: tuple(float(x) for x in s.split(",")),
+                   default=(0.03, 0.06, 0.09, 0.12, 0.16, 0.20), metavar="V1,V2,...",
+                   help="constant speeds (rad/s) for the 'fv' current-based sweep "
+                        "(default 0.03,0.06,0.09,0.12,0.16,0.2 - fine, low-speed range)")
+    d.add_argument("--vfric-period", type=float, default=3.0,
+                   help="'fv' triangle period (s); amplitude = speed*period/4 gives a real const-velocity dwell")
+    d.add_argument("--vfric-amp-max", type=float, default=0.35, help="'fv' amplitude safety cap per joint (rad)")
+    d.add_argument("--vfric-periods", type=int, default=2, help="'fv' whole triangle periods averaged per speed")
     d.add_argument("--print-every", type=float, default=0.5)
     d.add_argument("--no-keys", action="store_true", help="no stdin/SIGINT handling (scripts, tests)")
     d.add_argument("--hold-timeout", type=float, help="leave HOLD automatically (release) after this many seconds")
@@ -256,9 +307,45 @@ def main() -> None:
                         "(default 0.85; 0 = off). Uses fric_static/fric_kinetic from the config (Stribeck: breakaway level "
                         "at motion onset decaying to kinetic) - calibrate with the 's' and 'f' keys. The gate "
                         "on the estimated drive makes it creep-proof; ignored with --balance 0 (observe-only)")
+    d.add_argument("--balance-fric-model", choices=["viscous", "flat", "load"], default="viscous",
+                   help="which calibrated KINETIC friction model to start with: 'viscous' = fv combined fit "
+                        "(tau_c + mu*|g| + B*qd, 2026-09-07 config), 'flat' = same sweep refit without "
+                        "the load term (pooled tau_c + B), 'load' = previous friction_v2 PD-effort fit "
+                        "(tau_c + mu*|g|). Toggle live with 'fmodel <name>' or the web panel")
+    d.add_argument("--balance-mu", choices=["on", "off"], default="on",
+                   help="load term mu*|g(q)| of the kinetic friction model: on = calibrated (default), "
+                        "off = 0 (ablate load-dependence). Live: 'mu on|off' or the web toggle")
+    d.add_argument("--balance-viscous", choices=["on", "off"], default="on",
+                   help="viscous term B*qd of the kinetic friction model: on = calibrated (default), "
+                        "off = 0 (ablate velocity-dependence). Live: 'visc on|off' or the web toggle")
     d.add_argument("--balance-resist", type=float, default=None, metavar="R",
                    help="resist floor in [0, 0.7]: directions may be made at most 1/(1-R)x heavier "
                         "(default kappa/(1+kappa), the mirror of the assist ratio)")
+    d.add_argument("--serve", nargs="?", type=int, const=8730, default=None, metavar="PORT",
+                   help="with --balance: serve the Balance Console web panel on localhost:PORT (default 8730). "
+                        "Moving a slider / toggling a joint on the page changes kappa, friction, or per-joint "
+                        "sustain in THIS running session live, and prints the change here. A sandboxed "
+                        "claude.ai artifact can't reach the process - this local server is how the page drives it.")
+    d.add_argument("--serve-html", default=None, help="path to the panel HTML to serve (default: repo balance_panel.html)")
+    d.add_argument("--balance-damp", type=float, nargs=2, default=[0.0, 0.0], metavar=("D_T", "D_R"),
+                   help="paper 5.1: Cartesian virtual damping (D_v) at the hand, tool frame - translational "
+                        "N.s/m and rotational N.m.s/rad. Strictly dissipative (passive); dominates friction "
+                        "uncertainty so it can replace the sustain margins. Default 0 0 (off); try 4 0.6")
+    d.add_argument("--balance-breakaway", type=float, default=0.0, metavar="BETA",
+                   help="paper 5.2: breakaway-assist fraction [0..1]; pre-pays BETA * static friction in the "
+                        "estimated push direction (sign of r), decaying as the joint moves - helps break "
+                        "stiction from rest without a F/T sensor. Default 0 (off); try 0.35")
+    d.add_argument("--balance-alpha-vel", type=float, default=0.0, metavar="SIGMA",
+                   help="paper eq 38: taper friction comp near zero velocity, scale = 1-exp(-(qd/SIGMA)^2) "
+                        "(rad/s). Default 0 (off); try 0.05 (anti-chatter at standstill)")
+    d.add_argument("--balance-alpha-sing", type=float, default=0.0, metavar="K0",
+                   help="paper eq 39: taper friction comp near singularities, scale = min(1, K0/cond(J)). "
+                        "Default 0 (off); try 25")
+    d.add_argument("--balance-detent", type=float, default=0.0, metavar="KP",
+                   help="latched low-speed restoring spring (N.m/rad): when a joint goes quiet it holds the "
+                        "pose it stopped at, faded out while you guide. Unlike damping this HOLDS against a "
+                        "static bias (fixes the near-vertical j2 lean-back). Default 0 (off); try 3-5. "
+                        "Live: type 'detent <kp>'.")
     d.add_argument("--sim", action="store_true", help="run against the built-in simulator instead of hardware")
     d.add_argument("--sim-truth", type=float, default=1.0, help="simulator's true gravity scale (e.g. -1 to test the runaway guard)")
     d.add_argument("--fast", action="store_true", help="with --sim: don't sleep (faster than realtime)")

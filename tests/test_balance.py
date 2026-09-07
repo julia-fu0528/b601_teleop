@@ -447,6 +447,80 @@ def test_live_mode_toggles():
     assert not p.fric_on and p.sustain.any(), "bs must refuse while friction ff is off"
 
 
+def test_paper_features():
+    """Opt-in paper-aligned additions (viscous B, Cartesian damping D_v, breakaway assist,
+    alpha scheduling) - each does what it should, and defaults leave the output unchanged."""
+    q0=np.array([0.0,0.9,1.1,-0.4,0.0,0.0]); v=np.array([0.0,0.3,-0.2,0.1,0.0,0.0])
+    def mk(**kw):
+        b=BalancedDrag(DYN,kappa=0.0,fric_scale=0.85,fric=np.full(6,0.4),f_static=np.full(6,0.5),
+                       sustain_joints=np.zeros(6,bool),**kw)
+        b._observe(q0,v,0.011); b._observe(q0,v,0.011); return b
+    # (2) Cartesian damping is strictly dissipative
+    J=DYN.ee_jacobian(q0,frame="local"); Dv=np.diag([6.0]*3+[3.0]*3)
+    td=-(J.T@(Dv@(J@v)))
+    assert float(v@td)<-1e-3, "D_v damping must remove energy"
+    # (1) viscous adds exactly fric_scale*B*qd
+    o0=mk().update(q0,v,0.011); o1=mk(fric_viscous=np.full(6,0.05)).update(q0,v,0.011)
+    assert np.allclose(o1-o0, 0.85*0.05*v, atol=1e-6), "viscous term wrong"
+    # (4) velocity schedule tapers near zero (s_v small at 0.02, ~1 at 0.5)
+    b=mk(alpha_sigma_v=0.05)
+    assert (1-np.exp(-(0.02/0.05)**2))<0.2 and (1-np.exp(-(0.5/0.05)**2))>0.99
+    # (3) breakaway CONTRIBUTION (with - without) follows sign(r) and fades with speed
+    froze=lambda b: setattr(b,"_observe",lambda qq,vv,dt: setattr(b,"_g_abs",np.abs(DYN.gravity(qq))))
+    def brk_contrib(rv, vt):
+        bb=mk(break_beta=0.5,break_vs=0.10); froze(bb); bb.r=np.array([0.0,rv,0,0,0,0])
+        b0=mk(break_beta=0.0); froze(b0); b0.r=np.array([0.0,rv,0,0,0,0])
+        vv=np.array([0.,vt,0,0,0,0])
+        return float(bb.update(q0,vv,0.011)[1]-b0.update(q0,vv,0.011)[1])
+    lo=brk_contrib(0.6,0.01); hi=brk_contrib(0.6,0.5)
+    assert lo>0.1 and lo>hi, f"breakaway contrib should be +ve and fade: lo={lo:.3f} hi={hi:.3f}"
+    assert brk_contrib(-0.6,0.01)<-0.1, "breakaway sign must follow r"
+    # (5) latched detent: holds an un-driven joint against a static bias where damping can't,
+    #     and produces no torque while the hand drives it
+    def drift(kp, bias=0.15, I=0.3, steps=300, dt=0.011):
+        b=BalancedDrag(DYN,kappa=0.0,fric_scale=0.0,sustain_joints=np.zeros(6,bool),detent_kp=kp)
+        b._observe=lambda qq,vv,ddt: setattr(b,"_g_abs",np.abs(DYN.gravity(qq)))
+        qq=q0.copy(); vv=np.zeros(6); q0j=qq[1]
+        for _ in range(steps):
+            o=b.update(qq,vv,dt); a=(bias+o[1])/I; vv[1]+=a*dt; qq[1]+=vv[1]*dt
+        return abs(np.degrees(qq[1]-q0j))
+    assert drift(0.0)>90, "premise: without the detent the bias must run the joint away"
+    assert drift(5.0)<5, "detent must hold an un-driven joint against a static bias"
+    bd=BalancedDrag(DYN,kappa=0.0,fric_scale=0.0,sustain_joints=np.zeros(6,bool),detent_kp=5.0)
+    bd._observe=lambda qq,vv,ddt: setattr(bd,"_g_abs",np.abs(DYN.gravity(qq))); bd._q_latch=q0.copy()
+    bd.r=np.array([0.0,0.6,0,0,0,0])   # hand driving j2
+    assert abs(bd.update(q0+np.array([0,0.1,0,0,0,0]),np.array([0.,0.2,0,0,0,0]),0.011)[1])<1e-6, \
+        "detent must not fight the hand while it drives the joint"
+
+    # (6) live kinetic-friction-model A/B: values swap both ways, unknown name is a no-op
+    bm = BalancedDrag(DYN, kappa=0.0, fric=np.full(6, 0.3))
+    bm.fric_models = {"viscous": {"kin": [0.4]*6, "mu": [0.0]*6, "viscous": [0.1]*6},
+                      "load": {"kin": [0.6]*6, "mu": [0.02]*6, "viscous": [0.0]*6}}
+    assert bm.set_fric_model("load") == "load" and bm._raw_kin[0] == 0.6 and bm._raw_mu[0] == 0.02
+    assert bm.set_fric_model("viscous") == "viscous" and bm.fric_viscous[0] == 0.1 and bm._raw_mu[0] == 0.0
+    assert bm.set_fric_model("bogus") == "viscous" and bm._raw_kin[0] == 0.4
+
+    # (7) per-term ablation: mu and B toggles zero their terms and restore them
+    bt = BalancedDrag(DYN, kappa=0.0, fric=np.full(6, 0.3), fric_mu=np.full(6, 0.05),
+                      fric_viscous=np.full(6, 0.1), fric_scale=1.0, sustain_joints=np.zeros(6, bool))
+    bt._g_abs = np.full(6, 2.0)
+    lvl_on = bt.fric_curve(np.full(6, 1.0))            # fast -> kinetic level = kin + mu*|g|
+    assert bt.set_fric_terms(mu=False) == (False, True)
+    lvl_off = bt.fric_curve(np.full(6, 1.0))
+    assert np.allclose(lvl_on - lvl_off, 0.05 * 2.0), "mu off must remove exactly mu*|g|"
+    bt.r = np.zeros(6); bt._observe = lambda q, v, dt: None
+    v1 = np.full(6, 0.5)
+    with_v = bt.update(Q_WRIST.copy(), v1, 0.011)
+    bt.set_fric_terms(viscous=False)
+    no_v = bt.update(Q_WRIST.copy(), v1, 0.011)
+    assert np.allclose(with_v - no_v, 0.1 * 0.5, atol=1e-9), "visc off must remove exactly B*qd"
+    assert bt.set_fric_terms(mu=True, viscous=True) == (True, True)
+
+    # defaults: no feature changes the output vs a plain build
+    base=BalancedDrag(DYN,kappa=1.0,fric_scale=0.85,fric=COULOMB,f_static=COULOMB,sustain_joints=np.ones(6,bool))
+    assert base.damp_t==0 and base.break_beta==0 and base.alpha_sigma_v==0 and base.detent_kp==0 and not np.any(base.fric_viscous)
+
+
 def test_kappa_validation():
     for bad in (-0.1, 2.5):
         try:
@@ -463,7 +537,7 @@ if __name__ == "__main__":
                test_wrong_inertia_stays_bounded, test_live_retarget_slews,
                test_static_sweep_measures_breakaway, test_fric_curve_stribeck,
                test_fit_friction_recovers_load_model, test_fric_curve_tracks_load,
-               test_sustained_relief_j1_only, test_sustained_relief_all_joints, test_signed_margin_direction,
+               test_sustained_relief_j1_only, test_sustained_relief_all_joints, test_signed_margin_direction, test_paper_features,
                test_live_mode_toggles, test_kappa_validation]:
         print(f"-- {fn.__name__}")
         fn()

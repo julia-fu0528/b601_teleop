@@ -44,7 +44,8 @@ tau_max = 3.0
 kd_drag = 0.15     # j1 has no gravity ff so it needs no runaway damping; low kd = glides like the wrist (was 0.5)
 fric_comp = 0.35   # plain drag / --assist only; --balance auto-disables it (gated ff below replaces it)
 fric_static = 0.53     # friction_v2 fit 2026-09-05
-fric_kinetic = 0.52
+fric_kinetic = 0.43    # fv sweep (current-based, de-biased) 2026-09-07; was 0.52 (PD-effort fit)
+fric_viscous = 0.1086  # B from the same fv fit - matched pair with the tau_c above
 hold_kp = 20.0
 hold_kd = 1.5
 
@@ -56,11 +57,13 @@ g_scale = 0.94   # calib_v2 fit 2026-09-05, 65 captures incl. extended-high pose
 g_bias = -0.20   # bias across refits: -0.17 @31, -0.19 @43/@58, -0.20 @65
 tau_max = 18.0
 kd_drag = 0.5
-fric_comp = 0.35   # plain drag / --assist only; --balance auto-disables it (gated ff below replaces it)
+fric_comp = 0.20   # plain drag / --assist only; --balance auto-disables it. Lowered from 0.35: the fv
+                   # fit measured kinetic ~0.27, and fric_comp must stay below the real friction
 fric_static = 0.17
 fric_static_mu = 0.059
-fric_kinetic = 0.48
-fric_kinetic_mu = 0.018
+fric_kinetic = 0.18      # fv COMBINED fit 2026-09-07 (tau_c + mu*|g| + B*qd from the same sweep):
+fric_kinetic_mu = 0.032  # the load term explains the earlier noise (rms 0.090 flat -> 0.036). B ~ 0.
+                         # History: flat fv 0.27 (2026-09-07 am), PD-effort 0.48 + mu 0.018 (2026-09-05).
 hold_kp = 120.0
 hold_kd = 3.0
 
@@ -71,9 +74,10 @@ model = "rs-06"
 g_scale = 1.00   # calib_v2 fit 2026-08-31, 26 captures (rms 0.06)
 tau_max = 10.0
 kd_drag = 0.5
-fric_comp = 0.35   # plain drag / --assist only; --balance auto-disables it (gated ff below replaces it)
+fric_comp = 0.28   # plain drag / --assist only; --balance auto-disables it. Lowered from 0.35: the fv
+                   # fit measured kinetic 0.36, and 0.35 left almost no margin below the real friction
 fric_static = 0.52     # NOTE: breakaway is direction-asymmetric by up to +/-0.4 depending on pose
-fric_kinetic = 0.68
+fric_kinetic = 0.36    # fv sweep (current-based, de-biased) 2026-09-07; was 0.68 (PD-effort fit). B ~ 0.
 hold_kp = 120.0
 hold_kd = 3.0
 
@@ -87,7 +91,9 @@ kd_drag = 0.05
 fric_comp = 0.0
 fric_static = 0.13
 fric_static_mu = 0.049
-fric_kinetic = 0.28
+fric_kinetic = 0.12      # fv COMBINED fit 2026-09-07 (tau_c + mu*|g| + B*qd); was 0.28 (PD-effort fit)
+fric_kinetic_mu = 0.018  # load slope kept (rms 0.016 -> 0.012)
+fric_viscous = 0.0776    # B - matched set with tau_c/mu above
 hold_kp = 40.0
 hold_kd = 1.0
 
@@ -102,7 +108,7 @@ tau_max = 2.0
 kd_drag = 0.05
 fric_comp = 0.0
 fric_static = 0.23
-fric_kinetic = 0.24
+fric_kinetic = 0.22    # fv sweep (current-based, de-biased) 2026-09-07; was 0.24 (PD-effort fit). B ~ 0.
 hold_kp = 20.0
 hold_kd = 0.6
 
@@ -115,7 +121,8 @@ tau_max = 1.5
 kd_drag = 0.05
 fric_comp = 0.0
 fric_static = 0.21
-fric_kinetic = 0.25
+fric_kinetic = 0.16    # fv sweep (current-based, de-biased) 2026-09-07; was 0.25 (PD-effort fit)
+fric_viscous = 0.1121  # B from the same fv fit - matched pair with the tau_c above
 hold_kp = 20.0
 hold_kd = 0.6
 

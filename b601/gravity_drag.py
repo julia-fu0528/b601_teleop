@@ -21,7 +21,11 @@ Phases
           joint's torque ramps slowly until it moves 8 mrad, in both directions. Static friction =
           (tau+ + |tau-|)/2 (the gravity residual cancels). Prints paste-ready fric_static/fric_kinetic
           config lines when done. Hands off during the sweep (~10 s per joint).
-Keys while running (type + Enter): d = drag, h = hold, c = capture, f = friction sweep, s = static-friction sweep, r = release, q! = disable NOW.
+  VFRIC   (key fv, from DRAG) multi-speed CURRENT-BASED sweep: constant-velocity triangles at several speeds,
+          reading the motor torque feedback (torq = K_t*iq, eq 22) minus gravity = friction(+/-v). Rows go to
+          friction_v.csv; scripts/fit_friction.py regresses tau_c*tanh(v/eps) + B*v + c0 -> viscous B and a
+          de-biased tau_c (c0 soaks up residual gravity/current offset). Hands off (~30-60 s). Repeat at 3-6 poses.
+Keys while running (type + Enter): d = drag, h = hold, c = capture, f = friction sweep, fv = velocity-friction sweep, s = static-friction sweep, r = release, q! = disable NOW.
 With --balance also: m <kg> = set virtual mass, i <kg.m^2> = set virtual rot. inertia, + / - = 25 % heavier / lighter;
 b / bf / bs = toggle inertia shaping / friction compensation / j1 sustained relief live (state printed).
 Ctrl+C: DRAG/RAMP -> HOLD, HOLD -> RELEASE, RELEASE -> disable now.
@@ -75,6 +79,11 @@ class GravityDragController:
         fric_path: str | None = None,
         capture_s: float = 5.0,
         capture_amp: float = 0.05,
+        vfric_path: str | None = None,
+        vfric_speeds: tuple[float, ...] = (0.03, 0.06, 0.09, 0.12, 0.16, 0.20),
+        vfric_period: float = 3.0,
+        vfric_amp_max: float = 0.35,
+        vfric_periods: int = 2,
         print_every: float = 0.5,
         interactive: bool = True,
         realtime: bool = True,
@@ -101,6 +110,13 @@ class GravityDragController:
         self.fric_path = fric_path
         self.capture_s = float(capture_s)
         self.capture_amp = float(capture_amp)
+        # multi-speed current-based (torq-g) friction sweep -> B (viscous) + de-biased tau_c (eq 22-25)
+        self.vfric_path = vfric_path
+        self._vf_speeds = [abs(float(s)) for s in vfric_speeds if float(s) > 0]
+        self._vf_period = float(vfric_period)      # fixed triangle period; amp = speed*period/4 (const-velocity dwell)
+        self._vf_amp_max = float(vfric_amp_max)    # amplitude safety cap (rad) -> shortens the period at high speed
+        self._vf_nper = max(1, int(vfric_periods))
+        self._vf_rows: list[tuple] = []
         self.captures: list[dict] = []
         self.print_every = print_every
         self.interactive = interactive
@@ -116,6 +132,8 @@ class GravityDragController:
         self.freeze_reason: str | None = None
         self.events: list[tuple[float, str]] = []
         self.q_drag_end: np.ndarray | None = None
+        self.q_now: np.ndarray | None = None
+        self.telem: dict | None = None
         self.v_drag_end: np.ndarray | None = None
         self._cmds: "queue.Queue[str]" = queue.Queue()
         self._sim_t = 0.0
@@ -165,6 +183,28 @@ class GravityDragController:
             w.writerow([kind] + [f"{x:.5f}" for x in pose_q]
                        + [f"{x:.4f}" for x in vals] + [f"{x:.4f}" for x in resid])
         self._say(f"  appended to {self.fric_path} (repeat at 4-6 spread poses, then scripts/fit_friction.py)")
+
+    def _vf_est_s(self) -> float:
+        """Rough wall-clock for one velocity-friction sweep (all speeds), for the operator prompt."""
+        return float(sum(1.0 + self._vf_nper * min(self._vf_period, 4.0 * self._vf_amp_max / s)
+                         for s in self._vf_speeds))
+
+    def _append_vfric(self, rows) -> None:
+        """Append a multi-speed current-based sweep to the velocity-friction CSV. One row per
+        (speed, direction, pose): the signed commanded speed 'vset' (a pairing label), the pose,
+        the MEASURED per-joint velocity mv (actual speed reached), and torq-g per joint. The
+        fitter pairs +/-vset per pose, so mv (not vset) is the x-axis -> immune to tracking lag."""
+        path = self.vfric_path or "friction_v.csv"
+        new = not os.path.exists(path)
+        with open(path, "a", newline="") as cf:
+            w = csv.writer(cf)
+            if new:
+                w.writerow(["vset"] + [f"q{i+1}" for i in range(self.n)]
+                           + [f"mv{i+1}" for i in range(self.n)] + [f"f{i+1}" for i in range(self.n)])
+            for vset, q, mv, f in rows:
+                w.writerow([f"{vset:.5f}"] + [f"{x:.5f}" for x in q]
+                           + [f"{x:.5f}" for x in mv] + [f"{x:.4f}" for x in f])
+        self._say(f"  appended {len(rows)} rows to {path}")
 
     def _static_init(self, q, t) -> None:
         """Key 's': measure breakaway (static) friction per active joint, both directions."""
@@ -282,6 +322,7 @@ class GravityDragController:
                     if fails >= self.loop.max_read_failures:
                         self._freeze(q, f"{fails} consecutive position read failures ({e})")
                 v = vel.update(q, dt)
+                self.q_now = q                    # latest joint config, for the --serve web panel
                 g = dyn.gravity(q) * self.scale
 
                 # ---- commands
@@ -322,6 +363,25 @@ class GravityDragController:
                                 self._say(f"CAPTURE: holding {self.capture_s}s, measuring the PD residual — hands off")
                         else:
                             self._say("capture/friction only work from DRAG (type d first)")
+                    elif c in ("fv", "vfric"):
+                        if self.phase is Phase.DRAG and self._vf_speeds:
+                            self.q_hold = q.copy()
+                            self.phase, t_phase = Phase.CAPTURE, t
+                            self._cap_mode = "vfric"
+                            self._vf_si = 0
+                            self._vf_rows = []
+                            self._vf_pos = np.zeros(n); self._vf_npos = np.zeros(n)
+                            self._vf_neg = np.zeros(n); self._vf_nneg = np.zeros(n)
+                            self._vf_vpos = np.zeros(n); self._vf_vneg = np.zeros(n)
+                            spds = ", ".join(f"{s:g}" for s in self._vf_speeds)
+                            self._say(f"VELOCITY-FRICTION sweep (current-based, torq-g): constant-velocity triangles "
+                                      f"at [{spds}] rad/s (amp = v*{self._vf_period:g}/4, capped {self._vf_amp_max:g} rad), "
+                                      f"{self._vf_nper} periods each -> fits B + de-biased tau_c. "
+                                      f"HANDS OFF (~{self._vf_est_s():.0f}s total)")
+                        elif not self._vf_speeds:
+                            self._say("no vfric speeds configured (--vfric-speeds)")
+                        else:
+                            self._say("fv (velocity-friction) only works from DRAG (type d first)")
                     elif c in ("s", "static"):
                         if self.phase is Phase.DRAG:
                             self._static_init(q, t)
@@ -341,6 +401,74 @@ class GravityDragController:
                     elif self.assist is not None and hasattr(self.assist, "toggle_mode") \
                             and c in ("b", "bf", "bs"):
                         self._say(">>> " + self.assist.toggle_mode(c))
+                    elif self.assist is not None and hasattr(self.assist, "set_kappa") \
+                            and (c.startswith("bal ") or c.startswith("fric ") or c.startswith("sus ")
+                                 or c.startswith("lam ") or c.startswith("detent ")
+                                 or c.startswith("damp_t ") or c.startswith("damp_r ")
+                                 or c.startswith("break ") or c.startswith("alphav ") or c.startswith("alphas ")
+                                 or c.startswith("fmodel ") or c.startswith("mu ") or c.startswith("visc ")):
+                        # live parameter changes (typed, or pushed by the --serve web panel);
+                        # every change prints here so the CLI shows exactly what moved
+                        try:
+                            if c.startswith("bal "):
+                                nk = self.assist.set_kappa(float(c[4:]))
+                                self._say(f">>> balance kappa -> {nk:.2f}"
+                                          + ("" if nk > 0 else "  (inertia shaping OFF)"))
+                            elif c.startswith("fric "):
+                                nf = self.assist.set_fric_scale(float(c[5:]))
+                                self._say(f">>> friction compensation -> {nf:.0%} of calibrated"
+                                          + ("" if nf > 0 else "  (OFF)"))
+                            elif c.startswith("detent "):            # detent <kp>
+                                nk = self.assist.set_detent(float(c.split()[1]))
+                                self._say(f">>> latched detent -> {nk:g} N.m/rad" + ("" if nk > 0 else " (OFF)"))
+                            elif c.startswith("damp_t "):            # damp_t <N.s/m>
+                                dt, dr = self.assist.set_damp(d_t=float(c.split()[1]))
+                                self._say(f">>> Cartesian damping trans -> {dt:g} N.s/m" + ("" if dt > 0 else " (OFF)"))
+                            elif c.startswith("damp_r "):            # damp_r <N.m.s/rad>
+                                dt, dr = self.assist.set_damp(d_r=float(c.split()[1]))
+                                self._say(f">>> Cartesian damping rot -> {dr:g} N.m.s/rad" + ("" if dr > 0 else " (OFF)"))
+                            elif c.startswith("break "):             # break <0..1>
+                                nb = self.assist.set_break(float(c.split()[1]))
+                                self._say(f">>> breakaway assist -> {nb:.0%}" + ("" if nb > 0 else " (OFF)"))
+                            elif c.startswith("alphav "):            # alphav <sigma rad/s>
+                                sv, k0 = self.assist.set_alpha(sigma_v=float(c.split()[1]))
+                                self._say(f">>> alpha velocity knee -> {sv:g} rad/s" + ("" if sv > 0 else " (OFF, alpha=1)"))
+                            elif c.startswith("alphas "):            # alphas <K0>
+                                sv, k0 = self.assist.set_alpha(kappa0=float(c.split()[1]))
+                                self._say(f">>> alpha singularity K0 -> {k0:g}" + ("" if k0 > 0 else " (OFF)"))
+                            elif c.startswith("mu "):                # mu on|off - load term mu*|g(q)|
+                                on = c.split()[1] in ("on", "1", "true")
+                                m_on, _ = self.assist.set_fric_terms(mu=on)
+                                self._say(">>> load term mu*|g(q)| -> " + ("ON (calibrated)" if m_on else "OFF (ablated)"))
+                            elif c.startswith("visc "):              # visc on|off - viscous term B*qd
+                                on = c.split()[1] in ("on", "1", "true")
+                                _, v_on = self.assist.set_fric_terms(viscous=on)
+                                self._say(">>> viscous term B*qd -> " + ("ON (calibrated)" if v_on else "OFF (ablated)"))
+                            elif c.startswith("fmodel "):            # fmodel <viscous|load>
+                                want = c.split()[1]
+                                got = self.assist.set_fric_model(want)
+                                if got == want:
+                                    desc = {"viscous": "fv combined: tau_c + mu*|g(q)| + B*qd",
+                                            "flat": "fv flat refit: pooled tau_c + B*qd (no load term)",
+                                            "load": "friction_v2: tau_c + mu*|g(q)|"}.get(got, "")
+                                    self._say(f">>> kinetic friction model -> {got} ({desc})")
+                                else:
+                                    known = ", ".join(self.assist.fric_models) or "none loaded"
+                                    self._say(f"unknown friction model '{want}' (have: {known})")
+                            elif c.startswith("lam "):                # lam <0..5> <value>
+                                parts = c.split()
+                                li = int(parts[1]); nv = self.assist.set_lam(li, float(parts[2]))
+                                nm = ["trans-x", "trans-y", "trans-z", "rot-x", "rot-y", "rot-z"][li]
+                                unit = "kg" if li < 3 else "kg.m^2"
+                                self._say(f">>> Lambda_d {nm} -> {nv:g} {unit} (slews in ~0.5 s)")
+                            else:                                   # sus <joint#> <on|off>
+                                parts = c.split()
+                                ji = int(parts[1]) - 1
+                                on = parts[2] in ("on", "1", "true")
+                                st = self.assist.set_sustain_joint(ji, on)
+                                self._say(f">>> sustained relief joint{ji+1} -> {'ON' if st else 'OFF'}")
+                        except (ValueError, IndexError):
+                            self._say("usage: bal <0..2> | fric <0..0.85> | sus <1..6> <on|off> | lam <0..5> <val>")
                     elif self.assist is not None and hasattr(self.assist, "set_target") \
                             and (c in ("+", "-") or c[:1] in ("m", "i")):
                         try:
@@ -412,7 +540,65 @@ class GravityDragController:
                         tau_cmd = g + self.fric_comp * np.tanh(v / self.fric_v0)
                         if self.assist is not None:
                             tau_cmd = tau_cmd + self.assist.update(q, v, dt)
-                if self.phase is Phase.CAPTURE:
+                if self.phase is Phase.CAPTURE and getattr(self, "_cap_mode", "calib") == "vfric":
+                    # multi-speed CURRENT-BASED sweep: read the motor's torque feedback (torq = K_t*iq,
+                    # eq 22) at several constant speeds, subtract gravity -> friction(+/-v). The fit
+                    # (scripts/fit_friction.py) regresses tau_c*tanh(v/eps) + B*v + c0, giving B and a
+                    # de-biased tau_c (c0 absorbs any residual gravity/current offset).
+                    spd = self._vf_speeds[self._vf_si]
+                    period = self._vf_period                     # fixed period -> a real constant-velocity dwell
+                    amp = spd * period / 4.0                     # so |qd| = spd during each half-period
+                    if amp > self._vf_amp_max:                   # cap the excursion; shorten the period instead
+                        amp = self._vf_amp_max
+                        period = 4.0 * amp / spd
+                    total = 1.0 + self._vf_nper * period
+                    el = t - t_phase
+                    if el < 1.0:                                 # settle at this speed
+                        tri, dtri = 0.0, 0.0
+                    else:
+                        ph_ = ((el - 1.0) % period) / period
+                        tri = 4.0 * ph_ - 1.0 if ph_ < 0.5 else 3.0 - 4.0 * ph_
+                        dtri = (4.0 / period) if ph_ < 0.5 else (-4.0 / period)
+                    pos = self.q_hold + amp * tri
+                    velcmd = np.full(n, amp * dtri)
+                    kp = self.hold_kp
+                    kd = self.hold_kd
+                    tau_cmd = g.copy()
+                    if el >= 1.0 and np.isfinite(src.torq).any():
+                        f_meas = src.torq - g                    # current-based friction residual (eq 22)
+                        frac = ((el - 1.0) % period) / period
+                        # Per-joint STEADY-STATE gate: only average a sample once that joint has caught up
+                        # to the commanded speed (|v - velcmd| small) -> excludes the inertial transient
+                        # after each reversal, which otherwise biases B on the heavy joints. Record the
+                        # MEASURED v so the fit's x-axis is the actual speed, not the commanded one.
+                        steady = np.abs(v - velcmd) < (0.12 * spd + 0.015)
+                        if 0.10 < frac < 0.45:                   # +qd half (transients gated out per joint)
+                            m = steady.astype(float)
+                            self._vf_pos += m * f_meas; self._vf_vpos += m * v; self._vf_npos += m
+                        elif 0.60 < frac < 0.95:                 # -qd half
+                            m = steady.astype(float)
+                            self._vf_neg += m * f_meas; self._vf_vneg += m * v; self._vf_nneg += m
+                    if el >= total:                              # this speed done -> bank the +/-v rows
+                        fp = self._vf_pos / np.maximum(self._vf_npos, 1)
+                        fn = self._vf_neg / np.maximum(self._vf_nneg, 1)
+                        vp = self._vf_vpos / np.maximum(self._vf_npos, 1)
+                        vn = self._vf_vneg / np.maximum(self._vf_nneg, 1)
+                        self._vf_rows.append((+spd, self.q_hold.copy(), vp.copy(), fp.copy()))
+                        self._vf_rows.append((-spd, self.q_hold.copy(), vn.copy(), fn.copy()))
+                        self._say(f"  vfric ~{spd:.3f} rad/s: |qd|meas={np.round(0.5*(vp-vn),3)}  "
+                                  f"(torq-g)+={np.round(fp, 2)} -={np.round(fn, 2)}")
+                        self._vf_si += 1
+                        self._vf_pos = np.zeros(n); self._vf_npos = np.zeros(n)
+                        self._vf_neg = np.zeros(n); self._vf_nneg = np.zeros(n)
+                        self._vf_vpos = np.zeros(n); self._vf_vneg = np.zeros(n)
+                        t_phase = t
+                        if self._vf_si >= len(self._vf_speeds):
+                            self._append_vfric(self._vf_rows)
+                            self.phase, t_phase = Phase.DRAG, t
+                            vel.reset()
+                            self._say("velocity-friction sweep done -> back to DRAG. Repeat at 3-6 spread "
+                                      f"poses, then: python scripts/fit_friction.py {self.vfric_path or 'friction_v.csv'}")
+                elif self.phase is Phase.CAPTURE:
                     el = t - t_phase
                     friction_mode = getattr(self, "_cap_mode", "calib") == "friction"
                     period = 4.0 if friction_mode else 2.0
@@ -556,6 +742,10 @@ class GravityDragController:
                 # ---- telemetry from the feedback frames
                 torq = src.torq
                 t_rot = np.nanmax(src.temp) if np.isfinite(src.temp).any() else np.nan
+                self.telem = {                    # snapshot for the --serve web panel
+                    "v": v, "tau": tau_cmd, "temp": t_rot,
+                    "r": getattr(self.assist, "r", None),
+                }
                 if np.isfinite(t_rot) and t_rot > self.loop.temp_abort_c:
                     self._freeze(q, f"motor temperature {t_rot:.0f} C > {self.loop.temp_abort_c}")
                 if writer is not None:
