@@ -24,9 +24,9 @@ Safety structure (each is a hard result of the derivation, not tuning):
   * the URDF M has no rotor inertia = an UNDER-estimate, which is the safe error
     direction (over-estimating is what feeds acceleration back positively);
   * dead-band + rest-time bias learning keep the gravity-model residual from becoming
-    a phantom hand; the friction feed-forward is gated on sign(r * qd) so a joint that
-    drives itself (r goes negative against its own motion) shuts its own gate - the
-    creep mode of plain fric_comp cannot happen;
+    a phantom hand; the friction feed-forward follows the paper (tanh(v/v0), no drive
+    gate): passivity against calibration error comes from the Cartesian damping D_v
+    (eq 37) + kd_drag + the fric_scale headroom (see the note above update());
   * output ramps in over ramp_s, fades to zero near singularities (cond J 25 -> 40),
     is clamped per joint, and a runaway detector (kinetic energy rising while the
     estimated hand power is <= 0) halves the gain each trip. vel_abort/HOLD remain.
@@ -37,24 +37,16 @@ from __future__ import annotations
 
 import numpy as np
 
-# assumed Coulomb friction for the gated feed-forward (N.m): RS-06 from the capture
+# assumed Coulomb friction for the feed-forward (N.m): RS-06 from the capture
 # residuals, wrist from Seeed's sweep. Re-measure with the 'f' key; keep <= the real value.
 FRIC = np.array([0.50, 0.50, 0.50, 0.30, 0.21, 0.21])
 # dead-band on r: ~2x the gravity-fit residual rms per joint (see calib.csv fits)
 R0 = np.array([0.10, 0.10, 0.10, 0.05, 0.05, 0.05])
-# sustain margins: while a joint merely coasts, friction relief is capped at
-# (real kinetic level at the pose) - margin, so any residual push smaller than the margin
-# still decelerates it. Sized above the residuals measured on this unit (static sweep
-# 2026-08-27: [0.15 0.23 0.23 0.10 0.08 0.14] N.m). Revisit after a gravity re-fit.
-# margins are SIGNED where the residual push is one-sided; sized from the friction_v2
-# static sweeps (10 poses, final gravity model, 2026-08-31) + headroom:
-#   j2: -0.27 worst (cable side) / +0.09  -> 0.35 / 0.20
-#   j3: +/-0.42 breakaway ASYMMETRY that flips with pose - that is a rest-time effect the
-#       drive gate already handles; sliding-time error is small (kinetic rms 0.06), so a
-#       symmetric 0.30 covers gravity + kinetic error + the low-speed Stribeck blend
-#   j1 0.16 mixed, j4 0.09, j5 one +0.15 outlier, j6 0.10
-SUSTAIN_MARGIN_POS = np.array([0.20, 0.55, 0.65, 0.12, 0.15, 0.16])   # applies while qd > 0
-SUSTAIN_MARGIN_NEG = np.array([0.20, 0.55, 0.65, 0.12, 0.15, 0.16])   # applies while qd < 0
+# 2026-09-07 paper alignment: the drive gate and the per-joint sustain margins were REMOVED.
+# Friction relief now applies whenever a joint moves (tanh(v/v0) only), like the paper's tau_f_hat.
+# Passivity against calibration error is the job of the Cartesian damping D_v (paper eq 37) plus
+# the fric_scale headroom: with the tanh knee v0, a worst-case over-relief Delta injects at most
+# Delta*v^2/v0 of power, so joint damping >= Delta/v0 (J^T D_v J + kd_drag) strictly dissipates it.
 KAPPA_HARD_MAX = 2.0     # stability ceiling at ~90 Hz (see module docstring)
 
 
@@ -68,15 +60,17 @@ class BalancedDrag:
                  f_static_pos: np.ndarray | None = None,   # direction-dependent breakaway (paper eq 28;
                  f_static_neg: np.ndarray | None = None,   # None = symmetric f_static both ways)
                  v_stribeck: float = 0.15,
-                 sustain_joints: np.ndarray | None = None,
-                 sustain_margin: np.ndarray | float | None = None, v_hold: float = 0.10,
                  v0: float = 0.08, ramp_s: float = 2.0, dls_lambda: float = 0.05,
                  bias_tau: float = 5.0, r_net_max: float = 3.0,
                  fric_viscous: np.ndarray | None = None,       # (1) viscous B per joint (N.m.s/rad)
                  damp_t: float = 0.0, damp_r: float = 0.0,     # (2) Cartesian D_v (N.s/m, N.m.s/rad), tool frame
+                 damp_vsat: float = 0.15,                      # (2) damping saturation knee (rad/s): full
+                                                               #     strength below, torque capped above
                  break_beta: float = 0.0, break_vs: float = 0.10,   # (3) breakaway assist strength + decay speed
                  alpha_sigma_v: float = 0.0, alpha_kappa0: float = 0.0,  # (4) alpha scheduling (0 = off)
-                 detent_kp: float = 0.0, detent_vlatch: float = 0.08) -> None:  # (5) latched low-speed hold
+                 detent_kp: float = 0.0, detent_vlatch: float = 0.08,  # (5) latched low-speed hold
+                 gate_floor: float = 1.0) -> None:  # (6) soft intent gate: 1 = pure paper (ungated),
+                                                    #     0 = hard drive gate; CLI default 0.5 (hybrid)
         if not 0.0 <= kappa <= KAPPA_HARD_MAX:
             raise ValueError(f"kappa in [0, {KAPPA_HARD_MAX}] (stability limit of the ~90 Hz loop)")
         self.dyn = dyn
@@ -116,6 +110,8 @@ class BalancedDrag:
         # ---- paper-aligned additions (all default-off so existing behaviour is unchanged) ----
         self.fric_viscous = (np.zeros(self.n) if fric_viscous is None
                              else np.asarray(fric_viscous, float))       # (1) B in tau_f = f*tanh + B*qd
+        self.visc_vsat = 0.3   # rad/s: saturate the B*qd compensation at ~the fv sweep's speed range
+                               # (it is anti-damping - never extrapolate it beyond calibration)
         # named alternative KINETIC models for live A/B (statics never swap). Each entry:
         # {"kin": [n], "mu": [n], "viscous": [n]}. Populated by the CLI; empty = no toggle.
         self.fric_models: dict[str, dict] = {}
@@ -125,6 +121,8 @@ class BalancedDrag:
         self.mu_on = True
         self.visc_on = True
         self.damp_t = float(damp_t); self.damp_r = float(damp_r)         # (2) Cartesian damping D_v (tool frame)
+        self.damp_vsat = float(np.clip(damp_vsat, v0, 0.5))   # >= v0 keeps the passivity proof; <= 0.5
+        # so the saturation ceiling d_eff*vsat stays below wrist limit-cycle visibility
         self.break_beta = float(break_beta); self.break_vs = float(break_vs)  # (3) breakaway assist
         self.alpha_sigma_v = float(alpha_sigma_v)                        # (4) velocity schedule (0 = off)
         self.alpha_kappa0 = float(alpha_kappa0)                          # (4) singularity schedule (0 = off)
@@ -136,26 +134,16 @@ class BalancedDrag:
         self.detent_kp = float(detent_kp)
         self.detent_vlatch = float(detent_vlatch)
         self._q_latch: np.ndarray | None = None
-        # sustained relief, per joint (default: none; CLI default: all). While a joint is
-        # clearly moving its relief stays on but capped at (raw kinetic level at the pose)
-        # - margin, so any residual/bias below the margin still decelerates an un-driven
-        # joint. j1's guarantee is structural (vertical axis: no gravity term at all);
-        # the others are empirical - margins sized above the measured residuals.
-        self.sustain = (np.zeros(self.n, bool) if sustain_joints is None
-                        else np.asarray(sustain_joints, bool))
-        if sustain_margin is None:
-            self.margin_pos = SUSTAIN_MARGIN_POS[: self.n].copy()
-            self.margin_neg = SUSTAIN_MARGIN_NEG[: self.n].copy()
-        else:
-            sm = np.asarray(sustain_margin, float)
-            sm = np.full(self.n, float(sm)) if sm.ndim == 0 else sm
-            self.margin_pos = self.margin_neg = sm
-        # live mode toggles (keys b / bf / bs while running)
+        # (6) soft intent gate for the relief: s_int = floor + (1-floor)*clip(r*sign(v)/r0).
+        # The observer SEES a real hand push (external torque -> r) but model-error creep sits
+        # below the dead-band, so the gate discriminates intent from creep. floor keeps relief
+        # continuous (no die-off when the push relaxes, unlike the old hard gate) while un-driven
+        # motion meets (1 - fric_scale*floor) of the real friction as a structural brake.
+        self.gate_floor = float(np.clip(gate_floor, 0.0, 1.0))
+        # live mode toggles (keys b / bf while running)
         self.shaping_on = True
         self.fric_on = True
         self._fs = float(fric_scale)
-        self._sustain_cfg = self.sustain.copy()
-        self.v_hold = float(v_hold)   # rad/s: motion clearly established (self-creep cannot reach it)
 
         self.r0 = R0[: self.n].copy() if r0 is None else np.asarray(r0, float)
         self.tau_cap = np.full(self.n, 1.0) if tau_cap is None else np.asarray(tau_cap, float)
@@ -247,13 +235,17 @@ class BalancedDrag:
             self._fs = f      # keep the 'bf' key's launch-reference in sync
         return f
 
-    def set_damp(self, d_t: float | None = None, d_r: float | None = None) -> tuple[float, float]:
-        """Live Cartesian damping D_v (tool frame): translational N.s/m, rotational N.m.s/rad."""
+    def set_damp(self, d_t: float | None = None, d_r: float | None = None,
+                 vsat: float | None = None) -> tuple[float, float, float]:
+        """Live Cartesian damping D_v (tool frame): translational N.s/m, rotational N.m.s/rad,
+        and the saturation knee vsat (rad/s - full damping below, torque capped above)."""
         if d_t is not None:
             self.damp_t = float(max(d_t, 0.0))
         if d_r is not None:
             self.damp_r = float(max(d_r, 0.0))
-        return self.damp_t, self.damp_r
+        if vsat is not None:
+            self.damp_vsat = float(np.clip(vsat, self.v0, 0.5))   # [v0, 0.5]: guard proof / limit-cycle lid
+        return self.damp_t, self.damp_r, self.damp_vsat
 
     def set_break(self, beta: float) -> float:
         """Live breakaway-assist fraction [0..1]."""
@@ -291,18 +283,17 @@ class BalancedDrag:
         self.fric_model = name
         return self.fric_model
 
+    def set_gate_floor(self, f: float) -> float:
+        """Live soft-intent-gate floor [0..1]: 1 = pure paper (ungated relief), 0 = hard drive
+        gate, between = hybrid (un-driven motion gets floor*relief)."""
+        self.gate_floor = float(np.clip(f, 0.0, 1.0))
+        return self.gate_floor
+
     def set_detent(self, kp: float) -> float:
         """Live-set the latched low-speed detent stiffness (N.m/rad); 0 = off, re-latches on next quiet."""
         self.detent_kp = float(max(kp, 0.0))
         self._q_latch = None
         return self.detent_kp
-
-    def set_sustain_joint(self, i: int, on: bool) -> bool:
-        """Live per-joint sustained-relief toggle. Mirrors membership in --balance-sustain."""
-        i = int(i)
-        if 0 <= i < self.n:
-            self.sustain[i] = bool(on)
-        return bool(self.sustain[i]) if 0 <= i < self.n else False
 
     def update(self, q, v, dt=0.01) -> np.ndarray:
         self.lam_d += (self._lam_goal - self.lam_d) * (dt / (0.5 + dt))
@@ -324,22 +315,26 @@ class BalancedDrag:
         s_v = 1.0 if self.alpha_sigma_v <= 0 else (1.0 - np.exp(-(v / self.alpha_sigma_v) ** 2))
         s_k = 1.0 if self.alpha_kappa0 <= 0 else float(np.clip(self.alpha_kappa0 / max(cond, 1e-6), 0.0, 1.0))
 
-        # friction feed-forward, gated on the estimated drive agreeing with the motion;
-        # sustain-enabled joints (j1) additionally keep margin-capped relief while clearly moving
+        # friction feed-forward, paper-style (eq 13): applied whenever the joint moves, direction
+        # and taper from tanh(v/v0) alone - NO drive gate, NO sustain margins (relief is inherently
+        # "sustained"). Passivity against calibration error is guaranteed by the Cartesian damping
+        # D_v below (eq 37) + kd_drag + the fric_scale headroom: a worst-case over-relief Delta
+        # injects at most Delta*v^2/v0 of power near rest, so joint damping >= Delta/v0 dissipates it.
+        # (6) hybrid soft intent gate: full paper relief while the hand clearly drives a joint,
+        # floor*relief when it does not (motor creep, bias, coasting) - see the constructor note.
         gate = np.clip(self.r * np.sign(v) / self.r0, 0.0, 1.0)
+        s_int = self.gate_floor + (1.0 - self.gate_floor) * gate
         lvl = self.fric_curve(v) if self.fric_on else np.zeros(self.n)
-        t = np.tanh(v / self.v0)
-        f_ff = t * (lvl * gate)
-        if self.fric_on and self.sustain.any():
-            sus = np.clip((np.abs(v) - self.v_hold) / self.v_hold, 0.0, 1.0) * self.sustain
-            raw_lvl = np.minimum(self._raw_kin + self.mu_on * self._raw_mu * self._g_abs, self.level_max)
-            m_eff = np.where(v >= 0.0, self.margin_pos, self.margin_neg)
-            lvl_sus = np.clip(np.minimum(lvl, raw_lvl - m_eff), 0.0, None)
-            f_ff = t * np.maximum(lvl * gate, lvl_sus * sus)
+        f_ff = np.tanh(v / self.v0) * lvl * s_int
         f_ff = f_ff * s_v * s_k
-        # (1) viscous friction comp: cancel B*qd (paper eq 13). Self-zeroing at rest, so ungated.
+        # (1) viscous friction comp: cancel B*qd (paper eq 13). Self-zeroing at rest, so ungated -
+        # but SATURATED at the identification range (the fv sweep only measured |qd| <= ~0.2 rad/s).
+        # This term is anti-damping (+0.85*B*qd, positive velocity feedback); extrapolating it
+        # linearly ran j6 (B 0.112 vs kd 0.05: net slope +0.045*qd) away to vel_abort at 4 rad/s.
+        # Saturating caps the injection at 0.85*B*visc_vsat (~0.03 N.m) - a feel term, not a driver.
         if self.fric_on and self.visc_on and np.any(self.fric_viscous):
-            f_ff = f_ff + self.fric_scale * self.fric_viscous * v * s_k
+            vv = self.visc_vsat
+            f_ff = f_ff + self.fric_scale * self.fric_viscous * vv * np.tanh(v / vv) * s_int * s_k
         # (3) breakaway assist: when the hand is pushing (r_db != 0) pre-pay a fraction of the
         #     static breakaway in that direction, decaying as the joint gets moving. Direction
         #     from sign(r_db) - no F/T sensor needed. Helps proximal joints break free.
@@ -355,11 +350,28 @@ class BalancedDrag:
 
         # (2) Cartesian virtual damping D_v (passivity-aware): tau = -J^T D_v J qd. Strictly
         #     dissipative (qd . tau <= 0), so it can dominate friction-estimate error and keep
-        #     the rendered interaction passive - a cleaner guard than the sustain margins alone.
+        #     the rendered interaction passive - THE guard for the ungated relief (eq 37).
+        #     Two robustness deviations from the raw J^T D_v J: (a) DIAGONAL only - the
+        #     off-diagonal terms torque *other* joints, and under worst-case over-relief each
+        #     recruited joint gets its own relief, a positive-feedback channel (seen in sim);
+        #     the diagonal keeps eq-37's Cartesian sizing while staying per-joint dissipative.
+        #     (b) discrete-time cap: DELAYED damping (one cycle + the velocity-filter lag)
+        #     destabilizes a joint once d*dt/M_jj approaches ~0.3 (light wrists first; seen on
+        #     hardware as a wrist limit cycle whose amplitude is bounded by the saturation
+        #     ceiling d_eff*vsat - raising the knee raised the lid). Cap at 0.15*M_jj/dt.
+        #     (c) SATURATING, not linear: the guard is only needed near zero velocity (over-relief
+        #     injection is capped at Delta*tanh(v/v0), so its danger zone is slow creep). A linear
+        #     damper sized for that (~1 N.m.s/rad) costs ~1 N.m of drag at guiding speed - the arm
+        #     feels rigid. tau = -d_eff * vsat * tanh(v/vsat): slope d_eff at rest (guard intact -
+        #     dissipation >= injection for all v when vsat >= v0), felt drag capped at d_eff*vsat
+        #     (~0.15-0.2 N.m). 'damp_vs <rad/s>' tunes the knee live.
         tau_damp = np.zeros(self.n)
         if self.damp_t > 0.0 or self.damp_r > 0.0:
             Dv = np.diag([self.damp_t] * 3 + [self.damp_r] * 3)
-            tau_damp = -(J.T @ (Dv @ (J @ v)))
+            Dj = J.T @ (Dv @ J)
+            cap = 0.15 * np.maximum(np.diag(self._M), 1e-6) / max(dt, 1e-3)
+            vs = self.damp_vsat
+            tau_damp = -np.minimum(np.diag(Dj), cap) * vs * np.tanh(v / vs)
 
         # (5) latched detent: hold the pose whenever the hand is NOT driving the joint. The latch
         # follows q while you push (r_db != 0) and freezes when you release, so the spring holds
@@ -399,36 +411,25 @@ class BalancedDrag:
         return f_k + (f_s - f_k) * w
 
     def toggle_mode(self, code: str) -> str:
-        """Live mode keys: 'b' = inertia shaping, 'bf' = friction comp, 'bs' = j1 sustain.
+        """Live mode keys: 'b' = inertia shaping, 'bf' = friction comp.
         Returns the message to print. Re-enabling shaping restarts the 2 s ramp."""
         if code == "b":
             self.shaping_on = not self.shaping_on
             if self.shaping_on:
                 self._ramp_t = 0.0
                 return f"inertia shaping ON (kappa {self.kappa:g}, ramping in over {self.ramp_s:g} s)"
-            return "inertia shaping OFF (friction comp / sustain unchanged; b to re-enable)"
+            return "inertia shaping OFF (friction comp unchanged; b to re-enable)"
         if code == "bf":
             if self._fs <= 0.0:
                 return "friction ff was launched at 0 (--balance-fric 0) - restart to enable it"
             self.fric_on = not self.fric_on
             return (f"friction compensation ON (x{self._fs:g} of the calibrated levels)"
-                    if self.fric_on else "friction compensation OFF (sustain off with it)")
-        if code == "bs":
-            if not self.fric_on or self._fs <= 0.0:
-                return "sustain rides on the friction ff, which is off - enable it first (bf)"
-            if self.sustain.any():
-                self.sustain = np.zeros(self.n, bool)
-                return "sustained relief OFF (all joints drive-gated)"
-            self.sustain = (self._sustain_cfg.copy() if self._sustain_cfg.any()
-                            else np.ones(self.n, bool))
-            js = ", ".join(f"j{i+1}" for i in np.flatnonzero(self.sustain))
-            return f"sustained relief ON ({js}; margin-capped per joint)"
-        return "unknown mode key (b = shaping, bf = friction, bs = sustain)"
+                    if self.fric_on else "friction compensation OFF")
+        return "unknown mode key (b = shaping, bf = friction)"
 
     def summary(self) -> str:
         s = "bal r=" + " ".join(f"{x:+.2f}" for x in self.r) + f" a={self.alpha:.2f}"
-        off = [nm for nm, on in (("shape", self.shaping_on), ("fric", self.fric_on),
-                                 ("sus", bool(self.sustain.any()))) if not on]
+        off = [nm for nm, on in (("shape", self.shaping_on), ("fric", self.fric_on)) if not on]
         if off:
             s += " OFF:" + ",".join(off)
         if self.trips:

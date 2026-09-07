@@ -108,19 +108,8 @@ def cmd_drag(cfg, dyn, args) -> None:
         # static falls back to the kinetic slope when only the kinetic model was fitted
         mu_sta = np.array([j.fric_static_mu if j.fric_static > 0 else mu_kin[i]
                            for i, j in enumerate(cfg.joints)])
-        sus_arg = str(args.balance_sustain).strip().lower()
-        if args.observe or sus_arg in ("none", "0", "off"):
-            want = []
-        elif sus_arg in ("all", "1", "on", "default"):
-            want = list(cfg.joint_names)
-        else:
-            want = [w.strip() for w in args.balance_sustain.split(",")]
-        bad = [w for w in want if w not in cfg.joint_names]
-        if bad:
-            raise SystemExit(f"--balance-sustain: unknown joints {bad}; choose from {cfg.joint_names} or 'none'")
-        sustain_mask = np.array([nm in want for nm in cfg.joint_names])
-        # three independent toggles: kappa (inertia shaping), fric scale, sustain.
-        # --observe zeroes them all: pure estimator logging.
+        # two independent toggles: kappa (inertia shaping) and fric scale.
+        # --observe zeroes both: pure estimator logging.
         fs_raw = {"on": 0.85, "off": 0.0}.get(str(args.balance_fric).strip().lower(), None)
         if fs_raw is None:
             try:
@@ -136,12 +125,13 @@ def cmd_drag(cfg, dyn, args) -> None:
             fric_scale=fscale, fric=f_kin, f_static=f_sta,
             f_static_pos=f_sp, f_static_neg=f_sn,
             fric_mu=mu_kin, f_static_mu=mu_sta,
-            sustain_joints=sustain_mask,
             fric_viscous=np.array([j.fric_viscous for j in cfg.joints]),
             damp_t=args.balance_damp[0], damp_r=args.balance_damp[1],
+            damp_vsat=args.balance_damp_vsat,
             break_beta=args.balance_breakaway,
             alpha_sigma_v=args.balance_alpha_vel, alpha_kappa0=args.balance_alpha_sing,
             detent_kp=args.balance_detent,
+            gate_floor=args.balance_gate_floor,
             tau_cap=0.4 * np.array([j.tau_max for j in cfg.joints]))
         # two calibrated KINETIC friction models for live A/B ('fmodel <name>' or the web toggle);
         # statics (breakaway) are shared. "viscous" = whatever the config holds (fv COMBINED fit
@@ -176,10 +166,6 @@ def cmd_drag(cfg, dyn, args) -> None:
                     else "module defaults - calibrate with the 'f' and 's' keys")
         if np.any(mu_kin > 0) or np.any(mu_sta > 0):
             fric_src += ", load-dependent (f0 + mu*|g(q)|)"
-        if np.any(sustain_mask) and fscale > 0:
-            sus_names = [n for n, m in zip(cfg.joint_names, sustain_mask) if m]
-            fric_src += ("; sustained relief on ALL joints (margin-capped)" if len(sus_names) == len(cfg.joint_names)
-                         else f"; sustained relief on {sus_names} (margin-capped)")
         if args.balance == 0.0 and fscale == 0.0:
             mode = "OBSERVE-ONLY (zero output; r on the status line / log)"
         elif args.balance == 0.0:
@@ -286,14 +272,14 @@ def main() -> None:
                    help="force multiplication wrist -> base: base joints get G x the torque the sensed hand "
                         "force exerts on them, dividing their apparent stiction by ~(1+G)")
     d.add_argument("--observe", action="store_true",
-                   help="estimator logging only: implies --balance with inertia shaping, friction comp and "
-                        "sustain all OFF; r per joint on the status line / --log CSV. The safe first run")
+                   help="estimator logging only: implies --balance with inertia shaping and friction comp "
+                        "OFF; r per joint on the status line / --log CSV. The safe first run")
     d.add_argument("--balance", dest="balance", type=float, metavar="KAPPA",
                    help="balanced drag (momentum observer + Cartesian inertia shaping): estimate the hand "
                         "torque from motion, then shape the felt inertia toward an isotropic mass at the "
                         "gripper - joints heavier than the target assist, lighter ones resist the wrist "
                         "running away. KAPPA = max lightening ratio minus 1, in [0, 2]; 0 = inertia shaping "
-                        "OFF (friction comp / sustain still follow their own flags; use --observe for a "
+                        "OFF (friction comp still follows its own flag; use --observe for a "
                         "zero-output estimator run)")
     d.add_argument("--balance-md", type=float, default=1.8, metavar="KG",
                    help="target translational mass at the gripper (kg, default 1.8) - THE 'how heavy does it feel' knob")
@@ -302,17 +288,12 @@ def main() -> None:
                         "roll stays natural until the rotor inertia is identified)")
     d.add_argument("--balance-fo", type=float, default=3.0, metavar="HZ",
                    help="observer bandwidth (Hz, default 3; higher is snappier but lowers the stable KAPPA)")
-    d.add_argument("--balance-sustain", default="all", metavar="JOINTS",
-                   help="1/0 (on/off) or a comma list of joints: friction relief STAYS ON while a joint is "
-                        "clearly moving (> 0.1 rad/s), capped at (real kinetic level at the pose - margin) so "
-                        "residual pushes below the margin still decelerate it (margins per joint, sized above "
-                        "the measured model residuals). Default all; 'none'/0 = drive-gated everywhere "
-                        "(relief only while out-pushing full friction)")
     d.add_argument("--balance-fric", default="0.85", metavar="S",
                    help="fraction [0..1] of the measured friction to compensate while moving, or on/off "
-                        "(default 0.85; 0 = off). Uses fric_static/fric_kinetic from the config (Stribeck: breakaway level "
-                        "at motion onset decaying to kinetic) - calibrate with the 's' and 'f' keys. The gate "
-                        "on the estimated drive makes it creep-proof; ignored with --balance 0 (observe-only)")
+                        "(default 0.85; 0 = off). Uses fric_static/fric_kinetic from the config (Stribeck: "
+                        "breakaway level at motion onset decaying to kinetic) - calibrate with the 's' and 'f' "
+                        "keys. Paper-style: applied whenever a joint moves (no drive gate); passivity comes "
+                        "from --balance-damp + the 15%% headroom. Ignored with --balance 0 (observe-only)")
     d.add_argument("--balance-fric-model", choices=["viscous", "flat", "load"], default="viscous",
                    help="which calibrated KINETIC friction model to start with: 'viscous' = fv combined fit "
                         "(tau_c + mu*|g| + B*qd, 2026-09-07 config), 'flat' = same sweep refit without "
@@ -329,24 +310,37 @@ def main() -> None:
                         "(default kappa/(1+kappa), the mirror of the assist ratio)")
     d.add_argument("--serve", nargs="?", type=int, const=8730, default=None, metavar="PORT",
                    help="with --balance: serve the Balance Console web panel on localhost:PORT (default 8730). "
-                        "Moving a slider / toggling a joint on the page changes kappa, friction, or per-joint "
-                        "sustain in THIS running session live, and prints the change here. A sandboxed "
+                        "Moving a slider on the page changes kappa, friction, or the other live knobs "
+                        "in THIS running session live, and prints the change here. A sandboxed "
                         "claude.ai artifact can't reach the process - this local server is how the page drives it.")
     d.add_argument("--serve-html", default=None, help="path to the panel HTML to serve (default: repo balance_panel.html)")
-    d.add_argument("--balance-damp", type=float, nargs=2, default=[0.0, 0.0], metavar=("D_T", "D_R"),
-                   help="paper 5.1: Cartesian virtual damping (D_v) at the hand, tool frame - translational "
-                        "N.s/m and rotational N.m.s/rad. Strictly dissipative (passive); dominates friction "
-                        "uncertainty so it can replace the sustain margins. Default 0 0 (off); try 4 0.6")
+    d.add_argument("--balance-damp", type=float, nargs=2, default=[2.0, 0.3], metavar=("D_T", "D_R"),
+                   help="paper eq 37: Cartesian virtual damping (D_v) at the hand, tool frame - translational "
+                        "N.s/m and rotational N.m.s/rad. Strictly dissipative; THE passivity guard for the "
+                        "ungated friction relief (replaces the old sustain margins): joint damping must "
+                        "dominate worst-case over-relief / v0. Default 2 0.3 (core, ON); 0 0 to ablate")
+    d.add_argument("--balance-damp-vsat", type=float, default=0.08, metavar="V",
+                   help="damping saturation knee (rad/s): D_v acts at full strength below this speed "
+                        "(the passivity guard) and its torque saturates above it, so guiding-speed motion "
+                        "stays free (felt drag caps at ~d_eff*V, ~0.15-0.2 N.m). Live: 'damp_vs <V>'")
     d.add_argument("--balance-breakaway", type=float, default=0.0, metavar="BETA",
                    help="paper 5.2: breakaway-assist fraction [0..1]; pre-pays BETA * static friction in the "
                         "estimated push direction (sign of r), decaying as the joint moves - helps break "
                         "stiction from rest without a F/T sensor. Default 0 (off); try 0.35")
-    d.add_argument("--balance-alpha-vel", type=float, default=0.0, metavar="SIGMA",
-                   help="paper eq 38: taper friction comp near zero velocity, scale = 1-exp(-(qd/SIGMA)^2) "
-                        "(rad/s). Default 0 (off); try 0.05 (anti-chatter at standstill)")
+    d.add_argument("--balance-alpha-vel", type=float, default=0.03, metavar="SIGMA",
+                   help="paper 5.1 / eq 38: taper friction comp near zero velocity, scale = "
+                        "1-exp(-(qd/SIGMA)^2) (rad/s). ON by default (0.06) - the other half of the "
+                        "passivity design: it cuts the relief dither on velocity noise at the source, "
+                        "so D_v only has to cover real creep. 0 to ablate")
     d.add_argument("--balance-alpha-sing", type=float, default=0.0, metavar="K0",
                    help="paper eq 39: taper friction comp near singularities, scale = min(1, K0/cond(J)). "
                         "Default 0 (off); try 25")
+    d.add_argument("--balance-gate-floor", type=float, default=0.5, metavar="F",
+                   help="soft intent gate on the friction relief [0..1]: guided motion always gets full "
+                        "paper-style relief; UN-driven motion (motor creep, bias, coasting) gets only F of "
+                        "it, leaving (1-0.85*F) of the real friction as a structural brake. 1 = pure paper "
+                        "(ungated, the ablation baseline), 0 = the old hard drive gate. Default 0.5. "
+                        "Live: 'gfloor <F>'")
     d.add_argument("--balance-detent", type=float, default=0.0, metavar="KP",
                    help="latched low-speed restoring spring (N.m/rad): when a joint goes quiet it holds the "
                         "pose it stopped at, faded out while you guide. Unlike damping this HOLDS against a "

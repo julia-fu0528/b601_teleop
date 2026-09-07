@@ -334,98 +334,61 @@ def test_fric_curve_tracks_load():
     assert abs((hi - lo) - expect) < 0.01, f"level moved {hi-lo:.3f}, expected {expect:.3f}"
 
 
-def test_sustained_relief_j1_only():
-    """j1 keeps margin-capped relief while clearly moving: a push below full friction (but
-    above the 0.2 N.m margin) sustains it; a bias-sized push (below the margin) cannot; and
-    a non-sustain joint (j2) still stalls under a below-friction push (drive gate)."""
-    q0 = np.array([-1.2, 0.9, 1.1, -0.4, 0.0, 0.0])   # j1 off-center: room to travel before its limit
+def test_ungated_relief_sustains_motion():
+    """Paper-style relief (no drive gate, no margins): once a joint is moving, a push well
+    below full friction keeps it sliding, because the relief pays 85 % of the friction.
+    (Under the old margin scheme a 0.2 N.m push was below j2's margin and had to stall.)"""
+    q0 = np.array([0.0, 0.9, 1.1, -0.4, 0.0, 0.0])
     inertia = urdf_inertia(q0)
     t0 = T_DRAG + 2.5
-    sustain = np.array([True, False, False, False, False, False])
 
-    def scenario(joint, weak, t_probe=2.5):
-        kick = 0.8 if joint == 0 else 1.2   # j1's inertia is small; stay well under vel_abort
+    def ext(t, q):
+        out = np.zeros(6)
+        if t0 < t < t0 + 0.3:
+            out[1] = 0.6                    # establish motion
+        elif t0 + 0.3 <= t < t0 + 2.0:
+            out[1] = 0.2                    # far below friction 0.5, above the residual 0.85*0.5 leaves
+        return out
+    ext.state = {"Fs": np.zeros(3)}
+    probe = _Probe(_SimModel(DYN, inertia), ext, kappa=0.0, fric_scale=0.85,
+                   fric=COULOMB, f_static=COULOMB)
+    run(q0, assist=probe, external=ext, inertia=inertia, duration=5.5, ctrl_fric=0.0)
+    vj = np.array([v[1] for *_, v, _ in probe.hist])
+    v_late = float(abs(vj[int((t0 + 1.4) * CFG.loop.rate_hz)]))
+    assert v_late > 0.12, f"a below-friction push must keep j2 sliding (ungated relief), got {v_late:.3f}"
+
+
+def test_passivity_damping_bounds_over_relief():
+    """Paper eq 37: with the gate and margins gone, D_v is the passivity guard. Calibrate the
+    relief WELL ABOVE the sim's true friction (0.85*0.75 = 0.64 vs 0.5, Delta ~ 0.14 - the
+    sim's sharp friction knee masks smaller over-relief, so this probes the saturated regime): after a kick with the hand off,
+    the over-relief alone would keep the joint coasting; with D_v (+ kd_drag) it must decay.
+    The tanh knee bounds the injected power at Delta*v^2/v0, so damping >= Delta/v0 wins."""
+    q0 = np.array([0.0, 0.9, 1.1, -0.4, 0.0, 0.0])
+    inertia = urdf_inertia(q0)
+    t0 = T_DRAG + 2.5
+
+    def coast_speed(**damp):
         def ext(t, q):
             out = np.zeros(6)
             if t0 < t < t0 + 0.4:
-                out[joint] = kick         # establish motion
-            elif t0 + 0.4 <= t < t0 + 2.7:
-                out[joint] = weak
+                out[1] = 0.8                # kick, then hands off entirely
             return out
         ext.state = {"Fs": np.zeros(3)}
         probe = _Probe(_SimModel(DYN, inertia), ext, kappa=0.0, fric_scale=0.85,
-                       fric=COULOMB, f_static=COULOMB, sustain_joints=sustain)
-        run(q0, assist=probe, external=ext, inertia=inertia, duration=5.5, ctrl_fric=0.0)
-        vj = np.array([v[joint] for *_, v, _ in probe.hist])
-        return float(abs(vj[int((t0 + t_probe) * CFG.loop.rate_hz)]))
-
-    # j1: friction 0.5, sustained relief min(0.85*0.5, 0.5-0.2)=0.30
-    assert scenario(0, 0.35, t_probe=1.2) > 0.15, \
-        "j1 must keep sliding under a below-friction push (sustained relief)"
-    assert scenario(0, 0.15) < 0.08, "a margin-sized push must NOT sustain j1 (residuals cannot self-drive)"
-    assert scenario(1, 0.35) < 0.08, "j2 is drive-gated only and must stall under a below-friction push"
-
-
-def test_sustained_relief_all_joints():
-    """Default CLI mask: every joint keeps margin-capped relief while sliding. j2 (margin
-    0.28, friction 0.5 in sim -> sustained relief 0.22): a below-friction push above the
-    margin sustains it; a margin-sized push must NOT (residuals cannot self-drive)."""
-    q0 = np.array([0.0, 0.9, 1.1, -0.4, 0.0, 0.0])
-    inertia = urdf_inertia(q0)
-    t0 = T_DRAG + 2.5
-
-    def scenario(weak):
-        def ext(t, q):
-            out = np.zeros(6)
-            if t0 < t < t0 + 0.5:
-                out[1] = 1.2
-            elif t0 + 0.5 <= t < t0 + 2.7:
-                out[1] = weak
-            return out
-        ext.state = {"Fs": np.zeros(3)}
-        # explicit margin: this test checks the mechanism, not the tuned per-joint defaults
-        probe = _Probe(_SimModel(DYN, inertia), ext, kappa=0.0, fric_scale=0.85,
-                       fric=COULOMB, f_static=COULOMB, sustain_joints=np.ones(6, bool),
-                       sustain_margin=0.28)
-        run(q0, assist=probe, external=ext, inertia=inertia, duration=5.5, ctrl_fric=0.0)
+                       fric=np.full(6, 0.75), f_static=np.full(6, 0.75), **damp)
+        run(q0, assist=probe, external=ext, inertia=inertia, duration=6.0, ctrl_fric=0.0)
         vj = np.array([v[1] for *_, v, _ in probe.hist])
-        return float(abs(vj[int((t0 + 2.1) * CFG.loop.rate_hz)]))   # past the ~0.7 s decay constant
+        return float(abs(vj[int((t0 + 2.4) * CFG.loop.rate_hz)]))   # 2 s after the hand left
 
-    assert scenario(0.42) > 0.12, "j2 must keep sliding under a below-friction push above its margin"
-    assert scenario(0.18) < 0.08, "a margin-sized push must NOT sustain j2"
-
-
-def test_signed_margin_direction():
-    """The margin is signed: with defaults, j2's reserve is 0.35 along -q2 (its cable's push
-    direction) and 0.20 along +q2, so the same below-friction push sustains motion one way
-    and not the other (sim friction 0.5: relief 0.30 for +q2, 0.15 for -q2)."""
-    q0 = np.array([0.0, 0.9, 1.1, -0.4, 0.0, 0.0])
-    inertia = urdf_inertia(q0)
-    t0 = T_DRAG + 2.5
-
-    def scenario(sign):
-        def ext(t, q):
-            out = np.zeros(6)
-            if t0 < t < t0 + 0.5:
-                out[1] = sign * 1.2
-            elif t0 + 0.5 <= t < t0 + 2.7:
-                out[1] = sign * 0.30
-            return out
-        ext.state = {"Fs": np.zeros(3)}
-        # explicit asymmetric margins so the test probes the mechanism, not the tuned defaults
-        probe = _Probe(_SimModel(DYN, inertia), ext, kappa=0.0, fric_scale=0.85,
-                       fric=COULOMB, f_static=COULOMB, sustain_joints=np.ones(6, bool))
-        probe.margin_pos = np.full(6, 0.20); probe.margin_neg = np.full(6, 0.35)
-        run(q0, assist=probe, external=ext, inertia=inertia, duration=5.5, ctrl_fric=0.0)
-        vj = np.array([v[1] for *_, v, _ in probe.hist])
-        return float(abs(vj[int((t0 + 2.1) * CFG.loop.rate_hz)]))
-
-    assert scenario(+1) > 0.12, "+q2 (small margin side) must sustain under a 0.30 push"
-    assert scenario(-1) < 0.08, "-q2 (residual's push direction, 0.35 margin) must stall"
+    v_undamped = coast_speed()
+    v_damped = coast_speed(damp_t=4.0, damp_r=0.6)
+    assert v_undamped > 0.06,         f"premise: over-calibrated relief must keep the joint coasting without D_v (got {v_undamped:.3f})"
+    assert v_damped < 0.5 * v_undamped and v_damped < 0.05,         f"D_v must dissipate the over-relief (damped {v_damped:.3f} vs undamped {v_undamped:.3f})"
 
 
 def test_live_mode_toggles():
-    """Keys b / bf / bs flip inertia shaping, friction comp, and j1 sustain live."""
+    """Keys b / bf flip inertia shaping and friction comp live."""
     q0 = np.array([0.0, 0.9, 1.1, -0.4, 0.0, 0.0])
     inertia = urdf_inertia(q0)
 
@@ -441,17 +404,11 @@ def test_live_mode_toggles():
         assert ctrl.run() is Phase.DONE and ctrl.freeze_reason is None
         return probe
 
-    sus = np.array([True] + [False] * 5)
-    p = run_with(["b", "bf"], sustain_joints=sus)
+    p = run_with(["b", "bf"])
     assert not p.shaping_on and not p.fric_on
     assert p.alpha == 0.0 and "OFF:shape,fric" in p.summary()
-    p = run_with(["bs"], sustain_joints=sus)
-    assert not p.sustain.any() and p.shaping_on and p.fric_on
-    p = run_with(["b", "b", "bs", "bs"], sustain_joints=sus)
-    assert p.shaping_on and p.sustain.any()
-    # bs with friction off must refuse (sustain rides on the friction ff)
-    p = run_with(["bf", "bs"], sustain_joints=sus)
-    assert not p.fric_on and p.sustain.any(), "bs must refuse while friction ff is off"
+    p = run_with(["b", "b"])
+    assert p.shaping_on and p.fric_on
 
 
 def test_paper_features():
@@ -460,15 +417,16 @@ def test_paper_features():
     q0=np.array([0.0,0.9,1.1,-0.4,0.0,0.0]); v=np.array([0.0,0.3,-0.2,0.1,0.0,0.0])
     def mk(**kw):
         b=BalancedDrag(DYN,kappa=0.0,fric_scale=0.85,fric=np.full(6,0.4),f_static=np.full(6,0.5),
-                       sustain_joints=np.zeros(6,bool),**kw)
+                       **kw)
         b._observe(q0,v,0.011); b._observe(q0,v,0.011); return b
     # (2) Cartesian damping is strictly dissipative
     J=DYN.ee_jacobian(q0,frame="local"); Dv=np.diag([6.0]*3+[3.0]*3)
     td=-(J.T@(Dv@(J@v)))
     assert float(v@td)<-1e-3, "D_v damping must remove energy"
-    # (1) viscous adds exactly fric_scale*B*qd
-    o0=mk().update(q0,v,0.011); o1=mk(fric_viscous=np.full(6,0.05)).update(q0,v,0.011)
-    assert np.allclose(o1-o0, 0.85*0.05*v, atol=1e-6), "viscous term wrong"
+    # (1) viscous adds fric_scale*B*qd SATURATED at the identification range (visc_vsat)
+    o0=mk().update(q0,v,0.011); bv=mk(fric_viscous=np.full(6,0.05)); o1=bv.update(q0,v,0.011)
+    exp_v = 0.85*0.05*bv.visc_vsat*np.tanh(v/bv.visc_vsat)
+    assert np.allclose(o1-o0, exp_v, atol=1e-6), "viscous term wrong"
     # (4) velocity schedule tapers near zero (s_v small at 0.02, ~1 at 0.5)
     b=mk(alpha_sigma_v=0.05)
     assert (1-np.exp(-(0.02/0.05)**2))<0.2 and (1-np.exp(-(0.5/0.05)**2))>0.99
@@ -485,7 +443,7 @@ def test_paper_features():
     # (5) latched detent: holds an un-driven joint against a static bias where damping can't,
     #     and produces no torque while the hand drives it
     def drift(kp, bias=0.15, I=0.3, steps=300, dt=0.011):
-        b=BalancedDrag(DYN,kappa=0.0,fric_scale=0.0,sustain_joints=np.zeros(6,bool),detent_kp=kp)
+        b=BalancedDrag(DYN,kappa=0.0,fric_scale=0.0,detent_kp=kp)
         b._observe=lambda qq,vv,ddt: setattr(b,"_g_abs",np.abs(DYN.gravity(qq)))
         qq=q0.copy(); vv=np.zeros(6); q0j=qq[1]
         for _ in range(steps):
@@ -493,7 +451,7 @@ def test_paper_features():
         return abs(np.degrees(qq[1]-q0j))
     assert drift(0.0)>90, "premise: without the detent the bias must run the joint away"
     assert drift(5.0)<5, "detent must hold an un-driven joint against a static bias"
-    bd=BalancedDrag(DYN,kappa=0.0,fric_scale=0.0,sustain_joints=np.zeros(6,bool),detent_kp=5.0)
+    bd=BalancedDrag(DYN,kappa=0.0,fric_scale=0.0,detent_kp=5.0)
     bd._observe=lambda qq,vv,ddt: setattr(bd,"_g_abs",np.abs(DYN.gravity(qq))); bd._q_latch=q0.copy()
     bd.r=np.array([0.0,0.6,0,0,0,0])   # hand driving j2
     assert abs(bd.update(q0+np.array([0,0.1,0,0,0,0]),np.array([0.,0.2,0,0,0,0]),0.011)[1])<1e-6, \
@@ -509,7 +467,7 @@ def test_paper_features():
 
     # (7) per-term ablation: mu and B toggles zero their terms and restore them
     bt = BalancedDrag(DYN, kappa=0.0, fric=np.full(6, 0.3), fric_mu=np.full(6, 0.05),
-                      fric_viscous=np.full(6, 0.1), fric_scale=1.0, sustain_joints=np.zeros(6, bool))
+                      fric_viscous=np.full(6, 0.1), fric_scale=1.0)
     bt._g_abs = np.full(6, 2.0)
     lvl_on = bt.fric_curve(np.full(6, 1.0))            # fast -> kinetic level = kin + mu*|g|
     assert bt.set_fric_terms(mu=False) == (False, True)
@@ -520,14 +478,23 @@ def test_paper_features():
     with_v = bt.update(Q_WRIST.copy(), v1, 0.011)
     bt.set_fric_terms(viscous=False)
     no_v = bt.update(Q_WRIST.copy(), v1, 0.011)
-    assert np.allclose(with_v - no_v, 0.1 * 0.5, atol=1e-9), "visc off must remove exactly B*qd"
+    exp = 0.1 * bt.visc_vsat * np.tanh(0.5 / bt.visc_vsat)   # saturated B comp (identification range)
+    assert np.allclose(with_v - no_v, exp, atol=1e-9), "visc off must remove exactly the saturated B term"
     assert bt.set_fric_terms(mu=True, viscous=True) == (True, True)
+    # the B comp is anti-damping and must stay BOUNDED at speed: at 4 rad/s it may inject at most
+    # ~B*vsat (~0.03 N.m), never the linear 0.4 N.m that ran j6 away to vel_abort on hardware
+    v4 = np.full(6, 4.0)
+    with4 = bt.update(Q_WRIST.copy(), v4, 0.011)
+    bt.set_fric_terms(viscous=False)
+    no4 = bt.update(Q_WRIST.copy(), v4, 0.011)
+    bt.set_fric_terms(viscous=True)
+    assert np.all(np.abs(with4 - no4) < 0.05), f"B comp must saturate at speed: {np.round(with4 - no4, 3)}"
 
     # (8) direction-dependent breakaway (paper eq 28): fric_curve near rest and the breakaway
     # assist must select tau+ or tau- by direction, and fall back to symmetric when not given
     ba = BalancedDrag(DYN, kappa=0.0, fric=np.full(6, 0.3), f_static=np.full(6, 0.4),
                       f_static_pos=np.full(6, 0.6), f_static_neg=np.full(6, 0.2),
-                      fric_scale=1.0, sustain_joints=np.zeros(6, bool))
+                      fric_scale=1.0)
     ba._g_abs = np.zeros(6)
     fp = ba.fric_curve(np.full(6, +1e-4))            # ~rest, moving + -> static_pos level
     fn = ba.fric_curve(np.full(6, -1e-4))
@@ -535,8 +502,32 @@ def test_paper_features():
     sym = BalancedDrag(DYN, kappa=0.0, fric=np.full(6, 0.3), f_static=np.full(6, 0.4))
     assert np.allclose(sym._raw_static_pos, 0.4) and np.allclose(sym._raw_static_neg, 0.4)
 
+    # (9) damping saturates: full-slope guard near rest, but the felt drag at guiding speed is
+    # capped at d_eff*vsat - NOT proportional to velocity (that made the arm feel rigid on hardware)
+    bs2 = BalancedDrag(DYN, kappa=0.0, fric_scale=0.0, damp_t=4.0, damp_r=0.6, damp_vsat=0.15)
+    q0d = np.array([0.0, 0.9, 1.1, -0.4, 0.0, 0.0])
+    slow = bs2.update(q0d, np.array([0.0, 0.05, 0.0, 0.0, 0.0, 0.0]), 0.01)[1]
+    fast = bs2.update(q0d, np.array([0.0, 2.0, 0.0, 0.0, 0.0, 0.0]), 0.01)[1]
+    assert abs(slow) > 0.04, f"near rest the guard must act at full slope (got {slow:+.3f})"
+    assert abs(fast) < 0.35, f"at 2 rad/s the drag must be saturated, not ~2.6 N.m linear (got {fast:+.3f})"
+    assert abs(fast) < 3.0 * abs(slow) / (0.05 / 0.15), "drag must saturate, not grow linearly"
+
+    # (10) hybrid soft intent gate: full paper relief when the hand drives, floor*relief when
+    # not - the intent-vs-creep discrimination (creep lives below the observer dead-band).
+    bg = BalancedDrag(DYN, kappa=0.0, fric=np.full(6, 0.4), fric_scale=1.0, gate_floor=0.5)
+    bg._observe = lambda q, v, dt: setattr(bg, "_g_abs", np.zeros(6))
+    vg = np.full(6, 0.5)
+    bg.r = np.zeros(6)                                   # un-driven (creep): floor only
+    creep_ff = bg.update(Q_WRIST.copy(), vg, 0.011)
+    bg.r = np.full(6, 0.5)                               # clearly hand-driven: full relief
+    drive_ff = bg.update(Q_WRIST.copy(), vg, 0.011)
+    assert np.allclose(creep_ff, 0.5 * drive_ff, atol=1e-9), \
+        f"un-driven relief must be floor*driven: {creep_ff[1]:.3f} vs {drive_ff[1]:.3f}"
+    assert abs(drive_ff[1] - 0.4 * np.tanh(0.5 / bg.v0)) < 1e-6, "driven relief must be full paper"
+    assert BalancedDrag(DYN, kappa=0.0).gate_floor == 1.0, "constructor default must stay pure paper"
+
     # defaults: no feature changes the output vs a plain build
-    base=BalancedDrag(DYN,kappa=1.0,fric_scale=0.85,fric=COULOMB,f_static=COULOMB,sustain_joints=np.ones(6,bool))
+    base=BalancedDrag(DYN,kappa=1.0,fric_scale=0.85,fric=COULOMB,f_static=COULOMB)
     assert base.damp_t==0 and base.break_beta==0 and base.alpha_sigma_v==0 and base.detent_kp==0 and not np.any(base.fric_viscous)
 
 
@@ -556,7 +547,7 @@ if __name__ == "__main__":
                test_wrong_inertia_stays_bounded, test_live_retarget_slews,
                test_static_sweep_measures_breakaway, test_fric_curve_stribeck,
                test_fit_friction_recovers_load_model, test_fric_curve_tracks_load,
-               test_sustained_relief_j1_only, test_sustained_relief_all_joints, test_signed_margin_direction, test_paper_features,
+               test_ungated_relief_sustains_motion, test_passivity_damping_bounds_over_relief, test_paper_features,
                test_live_mode_toggles, test_kappa_validation]:
         print(f"-- {fn.__name__}")
         fn()

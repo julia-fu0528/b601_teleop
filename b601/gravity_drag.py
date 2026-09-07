@@ -29,7 +29,7 @@ Phases
           de-biased tau_c (c0 soaks up residual gravity/current offset). Hands off (~30-60 s). Repeat at 3-6 poses.
 Keys while running (type + Enter): d = drag, h = hold, c = capture, f = friction sweep, fv = velocity-friction sweep, s = static-friction sweep, r = release, q! = disable NOW.
 With --balance also: m <kg> = set virtual mass, i <kg.m^2> = set virtual rot. inertia, + / - = 25 % heavier / lighter;
-b / bf / bs = toggle inertia shaping / friction compensation / j1 sustained relief live (state printed).
+b / bf = toggle inertia shaping / friction compensation live (state printed).
 Ctrl+C: DRAG/RAMP -> HOLD, HOLD -> RELEASE, RELEASE -> disable now.
 """
 from __future__ import annotations
@@ -411,12 +411,12 @@ class GravityDragController:
                         arm.disable_all()
                         self.phase = Phase.DONE
                     elif self.assist is not None and hasattr(self.assist, "toggle_mode") \
-                            and c in ("b", "bf", "bs"):
+                            and c in ("b", "bf"):
                         self._say(">>> " + self.assist.toggle_mode(c))
                     elif self.assist is not None and hasattr(self.assist, "set_kappa") \
-                            and (c.startswith("bal ") or c.startswith("fric ") or c.startswith("sus ")
+                            and (c.startswith("bal ") or c.startswith("fric ")
                                  or c.startswith("lam ") or c.startswith("detent ")
-                                 or c.startswith("damp_t ") or c.startswith("damp_r ")
+                                 or c.startswith("damp_t ") or c.startswith("damp_r ") or c.startswith("damp_vs ") or c.startswith("gfloor ")
                                  or c.startswith("break ") or c.startswith("alphav ") or c.startswith("alphas ")
                                  or c.startswith("fmodel ") or c.startswith("mu ") or c.startswith("visc ")):
                         # live parameter changes (typed, or pushed by the --serve web panel);
@@ -434,11 +434,20 @@ class GravityDragController:
                                 nk = self.assist.set_detent(float(c.split()[1]))
                                 self._say(f">>> latched detent -> {nk:g} N.m/rad" + ("" if nk > 0 else " (OFF)"))
                             elif c.startswith("damp_t "):            # damp_t <N.s/m>
-                                dt, dr = self.assist.set_damp(d_t=float(c.split()[1]))
+                                dt, dr, dv = self.assist.set_damp(d_t=float(c.split()[1]))
                                 self._say(f">>> Cartesian damping trans -> {dt:g} N.s/m" + ("" if dt > 0 else " (OFF)"))
                             elif c.startswith("damp_r "):            # damp_r <N.m.s/rad>
-                                dt, dr = self.assist.set_damp(d_r=float(c.split()[1]))
+                                dt, dr, dv = self.assist.set_damp(d_r=float(c.split()[1]))
                                 self._say(f">>> Cartesian damping rot -> {dr:g} N.m.s/rad" + ("" if dr > 0 else " (OFF)"))
+                            elif c.startswith("gfloor "):            # gfloor <0..1> - soft intent gate floor
+                                gf = self.assist.set_gate_floor(float(c.split()[1]))
+                                desc = "pure paper (ungated)" if gf >= 1.0 else ("hard drive gate" if gf <= 0.0
+                                       else f"hybrid: un-driven motion gets {gf:.0%} relief")
+                                self._say(f">>> intent gate floor -> {gf:g} ({desc})")
+                            elif c.startswith("damp_vs "):           # damp_vs <rad/s> - saturation knee
+                                dt, dr, dv = self.assist.set_damp(vsat=float(c.split()[1]))
+                                self._say(f">>> damping saturation knee -> {dv:g} rad/s "
+                                          f"(felt drag caps at ~d_eff*{dv:g} N.m; below it = full passivity guard)")
                             elif c.startswith("break "):             # break <0..1>
                                 nb = self.assist.set_break(float(c.split()[1]))
                                 self._say(f">>> breakaway assist -> {nb:.0%}" + ("" if nb > 0 else " (OFF)"))
@@ -473,14 +482,10 @@ class GravityDragController:
                                 nm = ["trans-x", "trans-y", "trans-z", "rot-x", "rot-y", "rot-z"][li]
                                 unit = "kg" if li < 3 else "kg.m^2"
                                 self._say(f">>> Lambda_d {nm} -> {nv:g} {unit} (slews in ~0.5 s)")
-                            else:                                   # sus <joint#> <on|off>
-                                parts = c.split()
-                                ji = int(parts[1]) - 1
-                                on = parts[2] in ("on", "1", "true")
-                                st = self.assist.set_sustain_joint(ji, on)
-                                self._say(f">>> sustained relief joint{ji+1} -> {'ON' if st else 'OFF'}")
+                            else:                                   # lam <0..5> handled above; nothing else
+                                raise ValueError(c)
                         except (ValueError, IndexError):
-                            self._say("usage: bal <0..2> | fric <0..0.85> | sus <1..6> <on|off> | lam <0..5> <val>")
+                            self._say("usage: bal <0..2> | fric <0..0.85> | lam <0..5> <val> | detent <kp> | ...")
                     elif self.assist is not None and hasattr(self.assist, "set_target") \
                             and (c in ("+", "-") or c[:1] in ("m", "i")):
                         try:

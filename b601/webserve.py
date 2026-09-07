@@ -7,7 +7,6 @@ served from here over localhost. This starts a tiny stdlib HTTP server in a daem
                         being served from localhost it wires its sliders/checkboxes to /set
   GET  /set?p=bal&v=1.5           -> push "bal 1.5"  into the controller's command queue
   GET  /set?p=fric&v=0.5          -> push "fric 0.5"
-  GET  /set?p=sus&j=2&v=on        -> push "sus 2 on"
   GET  /state                     -> JSON of the live values (so the page reflects reality)
 
 Every /set turns into the same queued command a typed key would, so the control loop applies
@@ -50,7 +49,6 @@ def start(ctrl, html_path: str | Path, host: str = "127.0.0.1", port: int = 8730
             "shaping_on": bool(getattr(a, "shaping_on", False)),
             "fric_scale": float(getattr(a, "fric_scale", 0.0)),
             "fric_on": bool(getattr(a, "fric_on", False)),
-            "sustain": [bool(x) for x in getattr(a, "sustain", [])],
             "lam": _arr(getattr(a, "lam_d", None)),          # live Cartesian inertia (actual, slewed)
             "lam_goal": _arr(getattr(a, "_lam_goal", None)),  # its target (what the sliders set)
             "n": int(getattr(a, "n", 6)),
@@ -58,6 +56,8 @@ def start(ctrl, html_path: str | Path, host: str = "127.0.0.1", port: int = 8730
             "detent_kp": float(getattr(a, "detent_kp", 0.0)),
             "damp_t": float(getattr(a, "damp_t", 0.0)),
             "damp_r": float(getattr(a, "damp_r", 0.0)),
+            "damp_vsat": float(getattr(a, "damp_vsat", 0.15)),
+            "gate_floor": float(getattr(a, "gate_floor", 1.0)),
             "break_beta": float(getattr(a, "break_beta", 0.0)),
             "alpha_sigma_v": float(getattr(a, "alpha_sigma_v", 0.0)),
             "alpha_kappa0": float(getattr(a, "alpha_kappa0", 0.0)),
@@ -105,11 +105,9 @@ def start(ctrl, html_path: str | Path, host: str = "127.0.0.1", port: int = 8730
                     cmd = f"bal {float(v)}"
                 elif p == "fric":
                     cmd = f"fric {float(v)}"
-                elif p == "sus":
-                    cmd = f"sus {idx} {'on' if v in ('on', '1', 'true') else 'off'}"
                 elif p == "lam":
                     cmd = f"lam {idx} {float(v)}"
-                elif p in ("detent", "damp_t", "damp_r", "break", "alphav", "alphas"):
+                elif p in ("detent", "damp_t", "damp_r", "damp_vs", "gfloor", "break", "alphav", "alphas"):
                     cmd = f"{p} {float(v)}"       # single-scalar ablation knobs
                 elif p == "fmodel" and v.replace("_", "").isalnum():
                     cmd = f"fmodel {v}"           # kinetic friction model A/B toggle

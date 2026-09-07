@@ -6,7 +6,6 @@
     --muted:#5C645C; --faint:#8B948B; --border:#DEE3DC;
     --accent:#237A44; --accent-fill:#34A05C; --accent-soft:#E2F0E6; --track:#E5E9E3;
     --critical:#B3362B;
-    --sustain:#CC4B37; --sustain-fill:#E05A44; --sustain-soft:#F6E2DC; --sustain-ring:#D9CFC9;
     --shadow:0 1px 2px rgba(23,27,23,.06), 0 8px 24px rgba(23,27,23,.09);
     --gl-clear:#F7F8F5; --gl-grid:#C6CDC4; --gl-grid-major:#A9B2A7; --gl-ring:#34A05C;
   }
@@ -16,7 +15,6 @@
       --muted:#96A096; --faint:#6C766C; --border:#2E342D;
       --accent:#5FC581; --accent-fill:#3E9E5F; --accent-soft:#21301F; --track:#2A2F2A;
       --critical:#E06054;
-      --sustain:#F0705C; --sustain-fill:#E7614C; --sustain-soft:#331E1A; --sustain-ring:#3A423A;
       --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.45);
       --gl-clear:#121412; --gl-grid:#2B312A; --gl-grid-major:#3C443B; --gl-ring:#4DBB74;
     }
@@ -26,7 +24,6 @@
     --muted:#96A096; --faint:#6C766C; --border:#2E342D;
     --accent:#5FC581; --accent-fill:#3E9E5F; --accent-soft:#21301F; --track:#2A2F2A;
     --critical:#E06054;
-    --sustain:#F0705C; --sustain-fill:#E7614C; --sustain-soft:#331E1A; --sustain-ring:#3A423A;
     --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.45);
     --gl-clear:#121412; --gl-grid:#2B312A; --gl-grid-major:#3C443B; --gl-ring:#4DBB74;
   }
@@ -50,15 +47,9 @@
   #overlays{position:absolute;inset:0;pointer-events:none}
   .dot{position:absolute;transform:translate(-50%,-50%);pointer-events:none;
     display:flex;align-items:center;gap:6px;transition:opacity .15s}
-  .dot .bead{width:15px;height:15px;border-radius:50%;flex:none;
-    border:2px solid var(--sustain-ring);background:transparent;
-    transition:background .2s,border-color .2s,box-shadow .2s}
-  .dot.on .bead{background:var(--sustain-fill);border-color:var(--sustain);
-    box-shadow:0 0 0 3px var(--sustain-soft),0 0 12px var(--sustain-fill)}
   .dot .tag{font-family:"IBM Plex Mono",monospace;font-size:11px;font-weight:500;
     color:var(--ink);background:var(--surface);border:1px solid var(--border);
     padding:1px 5px;border-radius:4px;white-space:nowrap;opacity:.92}
-  .dot.on .tag{color:var(--sustain);border-color:var(--sustain)}
   .stagebar{position:absolute;left:14px;top:12px;display:flex;gap:8px;align-items:center}
   .badge{font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.02em;
     color:var(--muted);background:var(--surface);border:1px solid var(--border);
@@ -78,7 +69,6 @@
   .telem th:first-child,.telem td:first-child{text-align:left}
   .telem td{text-align:right;padding:1px 5px;color:var(--ink);white-space:nowrap}
   .telem td.jn{color:var(--muted);font-weight:600}
-  .telem td.on{color:var(--sustain);font-weight:600}
   .telem .ee{color:var(--accent);font-weight:600}
   .telem .sub{color:var(--faint);font-size:9.5px;margin-top:6px;line-height:1.45;
     font-family:"IBM Plex Sans",sans-serif;white-space:normal}
@@ -127,27 +117,6 @@
   .sfhead{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:4px}
   .sfhead .lab{font-weight:600;font-size:13.5px}
   .sfhead .count{font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--muted)}
-  .jlist{display:flex;flex-direction:column;gap:2px;margin-top:8px}
-  .jrow{display:flex;align-items:center;gap:11px;padding:7px 9px;border-radius:8px;
-    cursor:pointer;user-select:none;border:1px solid transparent;transition:background .12s}
-  .jrow:hover{background:var(--surface-dim)}
-  .jrow.on{background:var(--sustain-soft);border-color:color-mix(in srgb,var(--sustain) 34%,transparent)}
-  .jrow input{position:absolute;opacity:0;width:0;height:0}
-  .jrow .bead{width:14px;height:14px;border-radius:50%;flex:none;
-    border:2px solid var(--sustain-ring);background:transparent}
-  .jrow.on .bead{background:var(--sustain-fill);border-color:var(--sustain);
-    box-shadow:0 0 8px var(--sustain-fill)}
-  .jrow .jn{font-family:"IBM Plex Mono",monospace;font-weight:600;font-size:13px;min-width:52px}
-  .jrow .meta{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--muted);margin-left:auto;
-    font-variant-numeric:tabular-nums}
-  .jrow.on .meta{color:var(--sustain)}
-  .jrow .st{font-size:11px;color:var(--faint);width:74px}
-  .jrow.on .st{color:var(--sustain);font-weight:500}
-  .allrow{display:flex;gap:7px;margin-top:11px}
-  .allrow button{flex:1;font-family:"IBM Plex Mono",monospace;font-size:11.5px;
-    padding:6px;border:1px solid var(--border);background:var(--surface);color:var(--muted);
-    border-radius:7px;cursor:pointer;transition:.12s}
-  .allrow button:hover{border-color:var(--accent);color:var(--accent)}
   .lamlist{display:flex;flex-direction:column;gap:7px;margin-top:9px}
   .lamrow{display:grid;grid-template-columns:64px 1fr 58px;align-items:center;gap:9px}
   .lamrow .ln{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--muted)}
@@ -163,7 +132,7 @@
     border-radius:9px;padding:12px 13px;font-family:"IBM Plex Mono",monospace;font-size:12px;
     line-height:1.65;color:var(--ink);word-break:break-word;user-select:all}
   .cmd .flag{color:var(--accent)}
-  .cmd .num{color:var(--sustain)}
+  .cmd .num{color:var(--critical)}
   .copy{margin-top:9px;width:100%;font-family:"IBM Plex Mono",monospace;font-size:12px;
     font-weight:500;padding:8px;border:1px solid var(--accent);background:var(--accent-soft);
     color:var(--accent);border-radius:8px;cursor:pointer;transition:.12s}
@@ -184,7 +153,7 @@
       <span class="badge">reBot <b>B601-RS</b></span>
       <span class="badge">pose <b>L</b> · j2 40° j3 60°</span>
     </div>
-    <div class="hint">drag orbit · scroll zoom · <b>R</b> reset · red bead = sustained relief on</div>
+    <div class="hint">drag orbit · scroll zoom · <b>R</b> reset</div>
     <div class="toast" id="toast"></div>
   </div>
 
@@ -192,7 +161,7 @@
     <div class="phead">
       <p class="eyebrow">drag&nbsp;--balance</p>
       <h1>Balance Console</h1>
-      <p>Set what <code style="font-family:'IBM Plex Mono',monospace;font-size:12px">gravity_drag.py drag --balance</code> runs with. Adjust the two sliders and the per-joint sustain toggles; the robot marks which joints keep sustained friction relief, and the command below updates to match.</p>
+      <p>Set what <code style="font-family:'IBM Plex Mono',monospace;font-size:12px">gravity_drag.py drag --balance</code> runs with. Adjust the sliders; the command below updates to match.</p>
       <div class="modeline">
         <span class="pill" id="modePill">mode</span>
         <span id="modeDesc"></span>
@@ -222,19 +191,6 @@
       <p class="note" style="margin-top:6px">Model: <b>fv combined</b> — de-biased Coulomb τ_c + load slope μ·|g(q)| (j2/j4) + viscous B·q̇ (j1/j4/j6), fitted from the motor-current sweep (2026-09-07). Alternatives remain available from the CLI: <code>fmodel flat|load</code> live, or <code>--balance-fric-model</code>; per-term ablation via <code>mu on|off</code> / <code>visc on|off</code>.</p>
     </section>
 
-    <section>
-      <div class="sfhead">
-        <span class="lab">Sustained relief &nbsp;<span class="mono" style="color:var(--muted);font-weight:400">--balance-sustain</span></span>
-        <span class="count" id="sCount"></span>
-      </div>
-      <p class="note" style="margin-top:2px">Relief that stays on while a joint keeps moving (not only while you out-push friction). Capped a per-joint margin below real friction so an un-driven joint still decelerates.</p>
-      <div class="jlist" id="jlist"></div>
-      <div class="allrow">
-        <button id="allOn">all on</button>
-        <button id="j1Only">joint1 only</button>
-        <button id="allOff">all off</button>
-      </div>
-    </section>
 
     <section>
       <div class="sfhead">
@@ -250,7 +206,7 @@
         <span class="lab">Ablations &nbsp;<span class="mono" style="color:var(--muted);font-weight:400">paper features</span></span>
         <span class="count" id="ablCount"></span>
       </div>
-      <p class="note" style="margin-top:2px">The terms from the draft, each <b>off by default (0)</b>. Drag one up to feel what it adds — tuned values to try: damp T <b>4</b>, damp R <b>0.6</b>, breakaway <b>0.35</b>, α vel σ <b>0.05</b>, α sing K₀ <b>25</b>, detent <b>4</b>. Cartesian <b>damping</b> D_v resists tool-frame velocity (passivity margin); <b>breakaway</b> adds a load-scaled kick to overcome stiction at rest (no F/T needed); <b>α velocity</b> tapers friction comp near standstill (anti-chatter, knee σ); <b>α singularity</b> tapers it near kinematic singularities (onset K₀); <b>detent</b> is the latched restoring spring that holds an un-driven joint (fixes the near-vertical j2 lean-back). Live-only (needs <code>--serve</code>).</p>
+      <p class="note" style="margin-top:2px">The terms from the draft. <b>Damping is core and ON by default (2 / 0.3)</b> — D_v is what keeps the ungated friction relief passive (eq 37); drag it to 0 only to demonstrate why it is needed. <b>α vel σ is also core and ON (0.03)</b> — the other half of §5.1: it tapers the relief near zero velocity (eq 38) so noise can't dither it, which is what lets the damping stay light. The rest are off (0) — tuned values to try: breakaway <b>0.35</b>, α sing K₀ <b>25</b>, detent <b>4</b>. Cartesian <b>damping</b> D_v resists tool-frame velocity — full strength only below the <b>damp knee</b> (rad/s); above it the drag torque saturates, so guiding-speed motion stays free (raise the knee if the arm feels stiff, lower it if slow creep survives); <b>breakaway</b> adds a load-scaled kick to overcome stiction at rest (no F/T needed); <b>α velocity</b> tapers friction comp near standstill (anti-chatter, knee σ); <b>α singularity</b> tapers it near kinematic singularities (onset K₀); <b>detent</b> is the latched restoring spring that holds an un-driven joint (fixes the near-vertical j2 lean-back); <b>intent floor</b> is the hybrid soft gate — guided motion always gets full relief, un-driven motion (creep/coasting) gets only this fraction, leaving the rest of the friction as a brake (<b>1 = pure paper</b>/ungated, 0 = old hard gate, default 0.5). Live-only (needs <code>--serve</code>).</p>
       <div id="abllist" class="lamlist"></div>
     </section>
 
@@ -262,9 +218,7 @@
 
     <div class="foot">
       Reflects <code>b601/balance.py</code> defaults and the calibrated friction/margins in
-      <code>config/b601_rs.toml</code>. Live keys mirror these while dragging:
-      <span class="keys"><b>b</b></span> shaping, <span class="keys"><b>bf</b></span> friction,
-      <span class="keys"><b>bs</b></span> sustain. A browser page can't drive the CAN bus —
+      <code>config/b601_rs.toml</code>. Live keys mirror these while dragging: <span class="keys"><b>b</b></span> shaping, <span class="keys"><b>bf</b></span> friction. A browser page can't drive the CAN bus —
       this sets up the run and shows the state.
     </div>
   </aside>
@@ -276,8 +230,6 @@ const MESHES = {"base_link.STL": {"nv": 6680, "nt": 13414, "lo": [-0.07000000029
 
 /* calibrated data (config/b601_rs.toml + b601/balance.py, 2026-09-05) */
 const FRIC_KIN = [0.52,0.48,0.68,0.28,0.24,0.25];
-const MARGIN_POS = [0.20,0.55,0.65,0.12,0.15,0.16];
-const MARGIN_NEG = [0.20,0.55,0.65,0.12,0.15,0.16];
 const JMODEL = ["rs-06","rs-06","rs-06","rs-00","rs-00","rs-00"];
 const NJ = 6;
 
@@ -471,7 +423,7 @@ function renderTelemetry(){
   for(let i=0;i<NJ;i++){
     const p=poses[jmap["joint"+(i+1)].child].p;
     const deg=(q[i]*180/Math.PI).toFixed(1);
-    const cls=sustain[i]?' class="on"':' class="jn"';
+    const cls=' class="jn"';
     h+='<tr><td'+cls+'>j'+(i+1)+'</td><td>'+deg+'°</td>'
       +'<td>'+(p[0]*1000).toFixed(0)+'</td><td>'+(p[1]*1000).toFixed(0)+'</td><td>'+(p[2]*1000).toFixed(0)+'</td>'
       +(T?'<td>'+(T.tau?T.tau[i].toFixed(2):'–')+'</td><td>'+(T.r?T.r[i].toFixed(2):'–')+'</td>':'')
@@ -492,13 +444,12 @@ function renderTelemetry(){
   telemEl.innerHTML=h;
 }
 
-/* ============ joint sustain dots ============ */
+/* ============ joint marker dots ============ */
 const overlayRoot=document.getElementById("overlays");
-const sustain=[true,true,true,true,true,true];
 const dots=[];
 for(let i=0;i<NJ;i++){
   const el=document.createElement("div");el.className="dot";
-  el.innerHTML='<span class="bead"></span><span class="tag">j'+(i+1)+'</span>';
+  el.innerHTML='<span class="tag">j'+(i+1)+'</span>';
   overlayRoot.appendChild(el);dots.push(el);
 }
 function placeDots(){
@@ -509,7 +460,6 @@ function placeDots(){
     const el=dots[i];
     if(!s){el.style.opacity="0";continue;}
     el.style.opacity="1";el.style.left=s[0]+"px";el.style.top=s[1]+"px";
-    el.classList.toggle("on",sustain[i]);
   }
 }
 
@@ -518,34 +468,12 @@ const kSlider=document.getElementById("kSlider"),fSlider=document.getElementById
 const kVal=document.getElementById("kVal"),fVal=document.getElementById("fVal");
 const kNote=document.getElementById("kNote"),fNote=document.getElementById("fNote"),kSub=document.getElementById("kSub");
 const modePill=document.getElementById("modePill"),modeDesc=document.getElementById("modeDesc");
-const sCount=document.getElementById("sCount"),jlist=document.getElementById("jlist"),cmdEl=document.getElementById("cmd");
+const cmdEl=document.getElementById("cmd");
 
 function kappa(){return parseFloat(kSlider.value);}
 function fric(){return parseFloat(fSlider.value);}
 
-/* build joint rows */
-const rowEls=[];
-function buildRows(){
-  for(let i=0;i<NJ;i++){
-    const row=document.createElement("label");row.className="jrow";
-    const mn=Math.min(MARGIN_POS[i],MARGIN_NEG[i]),mx=Math.max(MARGIN_POS[i],MARGIN_NEG[i]);
-    const mtxt=mn===mx?mn.toFixed(2):mn.toFixed(2)+"/"+mx.toFixed(2);
-    row.innerHTML='<input type="checkbox"'+(sustain[i]?" checked":"")+'><span class="bead"></span>'+
-      '<span class="jn">joint'+(i+1)+'</span><span class="st">'+(sustain[i]?"sustained":"drive-gated")+'</span>'+
-      '<span class="meta">margin '+mtxt+'</span>';
-    const cb=row.querySelector("input");
-    cb.addEventListener("change",()=>{sustain[i]=cb.checked;liveSet("sus",cb.checked?"on":"off",i+1);syncAll();});
-    jlist.appendChild(row);rowEls.push(row);
-  }
-}
 
-function sustainArg(){
-  const on=[];for(let i=0;i<NJ;i++)if(sustain[i])on.push(i);
-  if(on.length===NJ)return "all";
-  if(on.length===0)return "none";
-  if(on.length===1&&on[0]===0)return "joint1";
-  return on.map(i=>"joint"+(i+1)).join(",");
-}
 
 function highlight(cmd){
   return cmd.replace(/(--[a-z-]+)/g,'<span class="flag">$1</span>')
@@ -571,18 +499,7 @@ function syncAll(){
     kNote.textContent="κ = "+k.toFixed(1)+". Heavier directions assist your push; lighter ones (the folding wrist) resist. Hard cap 2 — the ~90 Hz stability ceiling.";}
   // fric note
   if(f===0)fNote.textContent="Off. Joints drag against full gearbox friction.";
-  else fNote.textContent=Math.round(f*100)+"% of each joint's calibrated Coulomb friction is fed back while it moves — gated on the estimated hand drive so it can't creep.";
-  // sustain rows
-  let n=0;
-  for(let i=0;i<NJ;i++){
-    const on=sustain[i];if(on)n++;
-    rowEls[i].classList.toggle("on",on);
-    rowEls[i].querySelector("input").checked=on;
-    rowEls[i].querySelector(".st").textContent = f===0 ? "n/a (fric 0)" : (on?"sustained":"drive-gated");
-    rowEls[i].style.opacity = f===0 ? "0.5" : "1";
-  }
-  sCount.textContent = f===0 ? "friction off — no relief to sustain"
-    : n+" of "+NJ+" joints";
+  else fNote.textContent=Math.round(f*100)+"% of each joint's calibrated friction (Coulomb + μ·|g| + B·q̇) is fed back whenever it moves — paper-style, no drive gate; the D_v damping keeps it passive.";
   // command
   let parts=["python scripts/gravity_drag.py drag --balance "+k.toFixed(k%1?1:0).replace(/\.0$/,"")];
   if(Math.abs(f-0.85)>1e-6) parts.push("--balance-fric "+f.toFixed(2).replace(/0$/,"").replace(/\.$/,""));
@@ -603,28 +520,20 @@ function syncAll(){
     // emit a flag only when it differs from the tuned default — so at defaults the command stays
     // clean, and dragging one to 0 shows the explicit ablation (e.g. --balance-detent 0)
     if(off("damp_t")||off("damp_r")) parts.push("--balance-damp "+g(cur("damp_t"))+" "+g(cur("damp_r")));
+    if(off("damp_vsat"))     parts.push("--balance-damp-vsat "+g(cur("damp_vsat")));
     if(off("break_beta"))    parts.push("--balance-breakaway "+g(cur("break_beta")));
     if(off("alpha_sigma_v")) parts.push("--balance-alpha-vel "+g(cur("alpha_sigma_v")));
     if(off("alpha_kappa0"))  parts.push("--balance-alpha-sing "+g(cur("alpha_kappa0")));
     if(off("detent_kp"))     parts.push("--balance-detent "+g(cur("detent_kp")));
     const ablN=ablSliders.filter(x=>+x.sl.value>0).length;
-    const ac=document.getElementById("ablCount"); if(ac) ac.textContent = ablN+" of 6 on";
+    const ac=document.getElementById("ablCount"); if(ac) ac.textContent = ablN+" of "+ablSliders.length+" on";
   }
-  const sa=sustainArg();
-  if(sa!=="all") parts.push("--balance-sustain "+sa);
   const cmd=parts.join(" ");
   cmdEl.dataset.raw=cmd;
   cmdEl.innerHTML=highlight(cmd)+(lamNote?'<span style="color:var(--faint)">'+lamNote+'</span>':"");
   draw();
 }
 
-function setSustainAll(next){                 // apply + push only the joints that changed
-  for(let i=0;i<NJ;i++){ if(sustain[i]!==next[i]){ sustain[i]=next[i]; liveSet("sus",next[i]?"on":"off",i+1);} }
-  syncAll();
-}
-document.getElementById("allOn").onclick=()=>setSustainAll(Array(NJ).fill(true));
-document.getElementById("allOff").onclick=()=>setSustainAll(Array(NJ).fill(false));
-document.getElementById("j1Only").onclick=()=>setSustainAll(Array.from({length:NJ},(_,i)=>i===0));
 kSlider.addEventListener("input",()=>{touch();syncAll();});     // visual, continuous
 fSlider.addEventListener("input",()=>{touch();syncAll();});
 kSlider.addEventListener("change",()=>liveSet("bal",kappa()));   // network push on release
@@ -672,12 +581,14 @@ function updateLamMode(){
 
 /* ---- Ablations: one live scalar slider per optional paper term (0 = off) ---- */
 const ABL=[  // p = /set param & CLI command; sf = /state field; df = launch default (0 = off); dp = decimals
-  {p:"damp_t", sf:"damp_t",        l:"damp T", mn:0, mx:15,  st:0.5,  u:"N·s/m",      df:0, dp:1},
-  {p:"damp_r", sf:"damp_r",        l:"damp R", mn:0, mx:8,   st:0.2,  u:"N·m·s/rad",  df:0, dp:2},
+  {p:"damp_t", sf:"damp_t",        l:"damp T", mn:0, mx:15,  st:0.5,  u:"N·s/m",      df:2.0, dp:1},
+  {p:"damp_r", sf:"damp_r",        l:"damp R", mn:0, mx:8,   st:0.2,  u:"N·m·s/rad",  df:0.3, dp:2},
+  {p:"damp_vs",sf:"damp_vsat",     l:"damp knee",mn:0.08,mx:0.5,st:0.01,u:"rad/s",     df:0.08,dp:2},
   {p:"break",  sf:"break_beta",    l:"breakaway",mn:0,mx:1,  st:0.05, u:"×",          df:0, dp:2},
-  {p:"alphav", sf:"alpha_sigma_v", l:"α vel σ",mn:0, mx:0.30,st:0.01, u:"rad/s",      df:0, dp:2},
+  {p:"alphav", sf:"alpha_sigma_v", l:"α vel σ",mn:0, mx:0.30,st:0.01, u:"rad/s",      df:0.03, dp:2},
   {p:"alphas", sf:"alpha_kappa0",  l:"α sing K₀",mn:0,mx:60, st:5,    u:"",           df:0, dp:0},
   {p:"detent", sf:"detent_kp",     l:"detent", mn:0, mx:10,  st:0.5,  u:"N·m/rad",    df:0, dp:1},
+  {p:"gfloor", sf:"gate_floor",    l:"intent floor",mn:0,mx:1,st:0.05,u:"",           df:0.5,dp:2, z:"hard gate"},
 ];
 const ablSliders=[];
 function buildAbl(){
@@ -688,7 +599,7 @@ function buildAbl(){
       +'<input type="range" min="'+s.mn+'" max="'+s.mx+'" step="'+s.st+'" value="'+s.df+'">'
       +'<span class="lv"></span>';
     const sl=row.querySelector("input"), lv=row.querySelector(".lv");
-    const show=()=>lv.textContent=(parseFloat(sl.value)>0?parseFloat(sl.value).toFixed(s.dp)+(s.u?" "+s.u:""):"off");
+    const show=()=>lv.textContent=(parseFloat(sl.value)>0?parseFloat(sl.value).toFixed(s.dp)+(s.u?" "+s.u:""):(s.z||"off"));
     sl.addEventListener("input",()=>{touch();show();syncAll();});
     sl.addEventListener("change",()=>liveSet(s.p,parseFloat(sl.value)));
     box.appendChild(row); ablSliders.push({sl,show,sf:s.sf,df:s.df}); show();
@@ -700,10 +611,6 @@ function buildAbl(){
 function applyState(st){
   kSlider.value = st.shaping_on ? st.kappa : 0;
   fSlider.value = (st.fric_on===false) ? 0 : st.fric_scale;
-  if(Array.isArray(st.sustain)) for(let i=0;i<NJ;i++){
-    sustain[i]=!!st.sustain[i];
-    const cb=rowEls[i]&&rowEls[i].querySelector("input"); if(cb)cb.checked=sustain[i];
-  }
   const lg=st.lam_goal||st.lam;
   if(Array.isArray(lg)) for(const ls of lamSliders){ ls.sl.value=lg[ls.i]; ls.show(); }
   for(const as of ablSliders){ const v=st[as.sf]; if(typeof v==="number"){ as.sl.value=v; as.show(); } }
@@ -734,7 +641,7 @@ async function pullState(){
     document.querySelector(".stagebar").insertAdjacentHTML("beforeend",
       '<span class="badge" style="color:var(--accent);border-color:var(--accent)">● LIVE · drag session</span>');
     const lab=document.querySelector(".cli .lab"); if(lab)lab.textContent="Live — mirrors the running session (CLI keys too)";
-    setInterval(pollOnce,400);                    // reflect CLI-side param changes (b / bf / bs / bal / fric / sus)
+    setInterval(pollOnce,400);                    // reflect CLI-side param changes (b / bf / bal / fric / ...)
     setInterval(pollPose,66);                     // ~15 Hz live joint-config rendering
   }catch(e){}
 }
@@ -749,7 +656,6 @@ document.getElementById("copyBtn").onclick=async()=>{
 };
 
 /* boot */
-buildRows();
 buildLam();
 buildAbl();
 updateLamMode();
